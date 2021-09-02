@@ -1,0 +1,11 @@
+'use strict';
+
+var app = Application.currentApplication()
+app.includeStandardAdditions = true
+
+var Mail = Application('com.apple.mail')
+    var selectedMails = Mail.selection();
+				
+    for (var aMail of selectedMails) {
+        app.displayDialog(aMail.sender());
+    }
