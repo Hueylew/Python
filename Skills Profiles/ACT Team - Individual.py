@@ -56,15 +56,6 @@ for f in glob.glob('/Users/adamlewis/Documents/Work/Business Consultancy/Skills 
 	df_BA = df_BA.rename(columns={'A': 'Category'})
 	df_BA = df_BA.rename(columns={'B': 'Topic'})
 	df_BA = df_BA.rename(columns={'C': 'Skill Level'})
-	# df_BA = df_BA.append({'Category':'Score', 'Topic':'Score', PersonName : PersonScore}, ignore_index=True)
-	# df_BA = df_BA.append({'Category':'Target', 'Topic':'Target', PersonName : PersonTarget}, ignore_index=True)
-	# df_BA = df_BA.append({'Category':'Variance', 'Topic':'Variance', PersonName : PersonVariance}, ignore_index=True)
-	# df_BA = df_BA.append({'Category':'Role', 'Topic':'Role', PersonName : PersonRole}, ignore_index=True)
-	# df_BA = df_BA.append({'Category':'Work in', 'Topic':'Work in', PersonName : WorkIn}, ignore_index=True)
-	# df_BA = df_BA.append({'Category':'Location', 'Topic':'Location', PersonName : Location}, ignore_index=True)
-	# df_BA = df_BA.append({'Category':'Years GI', 'Topic':'Years GI', PersonName : YearsGI}, ignore_index=True)
-	# df_BA = df_BA.append({'Category':'Years BA', 'Topic':'Years BA', PersonName : YearsBA}, ignore_index=True)
-	# df_BA = df_BA.append({'Category':'Years SSP', 'Topic':'Years SSP', PersonName : YearsSSP}, ignore_index=True)
 	df_BA.at[2:7,'Category']='Analytical thinking and problem solving'
 	df_BA.at[9:11,'Category']='Communication skills'
 	df_BA.at[13:15,'Category']='Interaction skills'
@@ -92,11 +83,10 @@ all_data = all_data[1:]
 all_data.columns = new_header
 print(all_data)
 
-groupCategory = all_data.groupby('Category')['Skill Level'].mean()
-groupCategory.sort_index(ascending=False)
+groupCategory = all_data.groupby('Category')['Skill Level'].mean().sort_values(ascending=False)
 print(groupCategory)
 
-groupCategory.plot.bar(x="Category", y='Skill Level', rot=90, title="Skill Level")
+groupCategory.plot.bar(x="Category", y='Skill Level', rot=90, xlabel = 'Category', ylabel = 'Average Score', title="Average score by category")
 
 plt.show(block=True)
 
