@@ -78,7 +78,6 @@ for f in glob.glob('/Users/adamlewis/Documents/Work/Business Consultancy/Skills 
 	df_BA.at[72,'Category']='Integration'
 	df_BA.at[74:75,'Category']='BDX'
 
-
 	all_data = df_BA
 	
 """ 	#merge all dataframes together into one large dataframe
@@ -93,8 +92,11 @@ all_data = all_data[1:]
 all_data.columns = new_header
 print(all_data)
 
+groupCategory = all_data.groupby('Category')['Skill Level'].mean()
+groupCategory.sort_index(ascending=False)
+print(groupCategory)
 
-all_data.plot.bar(x="Category", y='Skill Level', rot=70, title="Skill Level")
+groupCategory.plot.bar(x="Category", y='Skill Level', rot=90, title="Skill Level")
 
 plt.show(block=True)
 
