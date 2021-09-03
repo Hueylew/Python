@@ -55,16 +55,16 @@ for f in glob.glob('/Users/adamlewis/Documents/Work/Business Consultancy/Skills 
 	df_BA["C"].replace({"SME": 4}, inplace=True)
 	df_BA = df_BA.rename(columns={'A': 'Category'})
 	df_BA = df_BA.rename(columns={'B': 'Topic'})
-	df_BA = df_BA.rename(columns={'C': PersonName})
-	df_BA = df_BA.append({'Category':'Score', 'Topic':'Score', PersonName : PersonScore}, ignore_index=True)
-	df_BA = df_BA.append({'Category':'Target', 'Topic':'Target', PersonName : PersonTarget}, ignore_index=True)
-	df_BA = df_BA.append({'Category':'Variance', 'Topic':'Variance', PersonName : PersonVariance}, ignore_index=True)
-	df_BA = df_BA.append({'Category':'Role', 'Topic':'Role', PersonName : PersonRole}, ignore_index=True)
-	df_BA = df_BA.append({'Category':'Work in', 'Topic':'Work in', PersonName : WorkIn}, ignore_index=True)
-	df_BA = df_BA.append({'Category':'Location', 'Topic':'Location', PersonName : Location}, ignore_index=True)
-	df_BA = df_BA.append({'Category':'Years GI', 'Topic':'Years GI', PersonName : YearsGI}, ignore_index=True)
-	df_BA = df_BA.append({'Category':'Years BA', 'Topic':'Years BA', PersonName : YearsBA}, ignore_index=True)
-	df_BA = df_BA.append({'Category':'Years SSP', 'Topic':'Years SSP', PersonName : YearsSSP}, ignore_index=True)
+	df_BA = df_BA.rename(columns={'C': 'Skill Level'})
+	# df_BA = df_BA.append({'Category':'Score', 'Topic':'Score', PersonName : PersonScore}, ignore_index=True)
+	# df_BA = df_BA.append({'Category':'Target', 'Topic':'Target', PersonName : PersonTarget}, ignore_index=True)
+	# df_BA = df_BA.append({'Category':'Variance', 'Topic':'Variance', PersonName : PersonVariance}, ignore_index=True)
+	# df_BA = df_BA.append({'Category':'Role', 'Topic':'Role', PersonName : PersonRole}, ignore_index=True)
+	# df_BA = df_BA.append({'Category':'Work in', 'Topic':'Work in', PersonName : WorkIn}, ignore_index=True)
+	# df_BA = df_BA.append({'Category':'Location', 'Topic':'Location', PersonName : Location}, ignore_index=True)
+	# df_BA = df_BA.append({'Category':'Years GI', 'Topic':'Years GI', PersonName : YearsGI}, ignore_index=True)
+	# df_BA = df_BA.append({'Category':'Years BA', 'Topic':'Years BA', PersonName : YearsBA}, ignore_index=True)
+	# df_BA = df_BA.append({'Category':'Years SSP', 'Topic':'Years SSP', PersonName : YearsSSP}, ignore_index=True)
 	df_BA.at[2:7,'Category']='Analytical thinking and problem solving'
 	df_BA.at[9:11,'Category']='Communication skills'
 	df_BA.at[13:15,'Category']='Interaction skills'
@@ -88,9 +88,17 @@ for f in glob.glob('/Users/adamlewis/Documents/Work/Business Consultancy/Skills 
 		all_data = pd.merge_ordered(all_data, df_BA) """
 		
 all_data.fillna('', inplace=True)
+new_header = all_data.iloc[0] 
+all_data = all_data[1:] 
+all_data.columns = new_header
 print(all_data)
 
-# save to excel file
+
+all_data.plot.bar(x="Category", y='Skill Level', rot=70, title="Skill Level")
+
+plt.show(block=True)
+
+""" # save to excel file
 book = load_workbook('/Users/adamlewis/BC Team Overall.xlsx')
 writer = pd.ExcelWriter('/Users/adamlewis/BC Team Overall.xlsx', engine='openpyxl') 
 writer.book = book
@@ -98,4 +106,4 @@ writer.sheets = dict((ws.title, ws) for ws in book.worksheets)
 
 all_data.to_excel(writer, "ACT Ordered", index = False)
 
-writer.save()
+writer.save() """
