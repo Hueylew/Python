@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from matplotlib import colors
 import openpyxl
 import os
 import xlsxwriter
@@ -12,8 +13,6 @@ from openpyxl.utils import get_column_interval
 import re
 import fpdf
 from fpdf import FPDF
-
-f = "/Users/adamlewis/Documents/Work/Business Consultancy/Skills and Development/Combined Skills Profiles 2021/*.xlsx"
 
 def load_workbook_range(range_string, ws):
 	col_start, col_end = re.findall("[A-Z]+", range_string)
@@ -74,12 +73,6 @@ for f in glob.glob('/Users/adamlewis/Documents/Work/Business Consultancy/Skills 
 	df_BA.at[74:75,'Category']='BDX'
 
 	all_data = df_BA
-	
-""" 	#merge all dataframes together into one large dataframe
-	if index == 1:
-		all_data = df_BA
-	else:
-		all_data = pd.merge_ordered(all_data, df_BA) """
 		
 all_data.fillna('', inplace=True)
 new_header = all_data.iloc[0] 
@@ -89,28 +82,32 @@ print(all_data)
 
 groupCategory = all_data.groupby('Category')['Skill Level'].mean().sort_values(ascending=False)
 print(groupCategory)
-
-groupCategory.plot.bar(x="Category", y='Skill Level', rot=90, xlabel = 'Category', ylabel = 'Average Score', title="Average score by category")
-
-plt.show(block=True)
+groupCategory.plot.bar(x="Category", y='Skill Level', rot=90, color='y', xlabel = 'Category', ylabel = 'Score', title="Score by category")
+plt.tick_params(axis='x', labelsize=8)
+plt.tick_params(axis='x', pad=-250)
+plt.savefig('ACT Average Scores.png')
+# plt.show(block=True)
 
 document = fpdf.FPDF()
 
-document.set_font('Aileron', style='B', size=16)
+document.set_font('Helvetica', style='B', size=20)
 document.set_text_color(19, 83, 173)
 document.add_page()
 document.cell(60)
-
 document.cell(70, 10, PersonName, 1, 0, "C")
-document.ln(2)
+document.ln(20)
+document.set_font('Helvetica', style='', size=12)
+document.set_text_color(0)
+document.cell(0, h=5, txt = 'Role: ' + PersonRole + ' working in ' + WorkIn)
+document.ln(5)
+document.cell(0, h=5, txt = 'Location: ' + Location)
+document.ln(5)
+document.cell(0, h=5, txt = 'Years at SSP: ' + str(YearsSSP))
+document.ln(5)
 
-document.image('/Users/adamlewis/Library/Mobile Documents/com~apple~CloudDocs/Masons/26349018.png', 95, 22, 20)
-
+# Add in ACT Scores Plot Image
+document.image('ACT Average Scores.png', w=150, h=100)
 document.ln(30)
 
-document.set_font('Aileron', style='', size=12)
-document.set_text_color(0)
-document.cell(0, h=5, txt = PersonRole)
-document.ln
-
-document.output('Report.pdf')
+#Save the PDF Document
+document.output(PersonName + ' - Skills Profile Report.pdf')
