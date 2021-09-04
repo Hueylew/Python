@@ -10,6 +10,10 @@ import matplotlib.pyplot as plt
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_interval
 import re
+import fpdf
+from fpdf import FPDF
+
+f = "/Users/adamlewis/Documents/Work/Business Consultancy/Skills and Development/Combined Skills Profiles 2021/*.xlsx"
 
 def load_workbook_range(range_string, ws):
 	col_start, col_end = re.findall("[A-Z]+", range_string)
@@ -90,12 +94,23 @@ groupCategory.plot.bar(x="Category", y='Skill Level', rot=90, xlabel = 'Category
 
 plt.show(block=True)
 
-""" # save to excel file
-book = load_workbook('/Users/adamlewis/BC Team Overall.xlsx')
-writer = pd.ExcelWriter('/Users/adamlewis/BC Team Overall.xlsx', engine='openpyxl') 
-writer.book = book
-writer.sheets = dict((ws.title, ws) for ws in book.worksheets)
+document = fpdf.FPDF()
 
-all_data.to_excel(writer, "ACT Ordered", index = False)
+document.set_font('Aileron', style='B', size=16)
+document.set_text_color(19, 83, 173)
+document.add_page()
+document.cell(60)
 
-writer.save() """
+document.cell(70, 10, PersonName, 1, 0, "C")
+document.ln(2)
+
+document.image('/Users/adamlewis/Library/Mobile Documents/com~apple~CloudDocs/Masons/26349018.png', 95, 22, 20)
+
+document.ln(30)
+
+document.set_font('Aileron', style='', size=12)
+document.set_text_color(0)
+document.cell(0, h=5, txt = PersonRole)
+document.ln
+
+document.output('Report.pdf')
