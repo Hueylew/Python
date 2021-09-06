@@ -8,12 +8,9 @@ import plotly.express as px
 from PIL import Image
 import numpy as np
 import glob
-import matplotlib.pyplot as plt
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_interval
 import re
-import fpdf
-from fpdf import FPDF
 
 def load_workbook_range(range_string, ws):
 	col_start, col_end = re.findall("[A-Z]+", range_string)
@@ -86,22 +83,12 @@ new_header = all_data.iloc[0]
 all_data = all_data[1:] 
 all_data.columns = new_header
 dfCategory = all_data.groupby('Category')['Skill Level'].mean().sort_values(ascending=False)
-dfCategory.columns = ['Category']
-print(dfCategory)
-list(dfCategory.columns)
 
-figScores = px.bar(df_Scores, x='ACT', y='')
-figCategory = px.bar(dfCategory, x='Category', y='Skill Level')
+figScores = px.bar(df_Scores, x='ACT', y='', orientation='h')
 
 df = all_data
-fig = px.bar(df, x="Category", y="Skill Level", orientation='v')
-# fig.show()
-		
-all_data.fillna('', inplace=True)
-new_header = all_data.iloc[0] 
-all_data = all_data[1:] 
-all_data.columns = ['Category', 'Topic', 'Skill Level']
 dfCategory = all_data.groupby('Category')['Skill Level'].mean().sort_values(ascending=False)
+fig = px.bar(df, x="Category", y="Skill Level", title='Score by Category',orientation='v')
 
 st.set_page_config(page_title='Skills Profiles')
 st.header(' ACT Skills Profiles Results 2021')
@@ -111,4 +98,3 @@ st.dataframe(all_data)
 st.dataframe(dfCategory)
 st.plotly_chart(fig)
 st.plotly_chart(figScores)
-st.plotly_chart(figCategory)
