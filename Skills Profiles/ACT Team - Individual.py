@@ -88,26 +88,31 @@ plt.tick_params(axis='x', pad=-250)
 plt.savefig('ACT Average Scores.png')
 # plt.show(block=True)
 
-document = fpdf.FPDF()
+import plotly.express as px
+df = all_data
+fig = px.bar(df, x="Category", y="Skill Level", orientation='v')
+fig.show()
 
-document.set_font('Helvetica', style='B', size=20)
-document.set_text_color(19, 83, 173)
-document.add_page()
-document.cell(60)
-document.cell(70, 10, PersonName, 1, 0, "C")
-document.ln(20)
-document.set_font('Helvetica', style='', size=12)
-document.set_text_color(0)
-document.cell(0, h=5, txt = 'Role: ' + PersonRole + ' working in ' + WorkIn)
-document.ln(5)
-document.cell(0, h=5, txt = 'Location: ' + Location)
-document.ln(5)
-document.cell(0, h=5, txt = 'Years at SSP: ' + str(YearsSSP))
-document.ln(5)
+# document = fpdf.FPDF()
 
-# Add in ACT Scores Plot Image
-document.image('ACT Average Scores.png', w=150, h=100)
-document.ln(30)
+# document.set_font('Helvetica', style='B', size=20)
+# document.set_text_color(19, 83, 173)
+# document.add_page()
+# document.cell(60)
+# document.cell(70, 10, PersonName, 1, 0, "C")
+# document.ln(20)
+# document.set_font('Helvetica', style='', size=12)
+# document.set_text_color(0)
+# document.cell(0, h=5, txt = 'Role: ' + PersonRole + ' working in ' + WorkIn)
+# document.ln(5)
+# document.cell(0, h=5, txt = 'Location: ' + Location)
+# document.ln(5)
+# document.cell(0, h=5, txt = 'Years at SSP: ' + str(YearsSSP))
+# document.ln(5)
 
-#Save the PDF Document
-document.output(PersonName + ' - Skills Profile Report.pdf')
+# # Add in ACT Scores Plot Image
+# document.image('ACT Average Scores.png', w=150, h=100)
+# document.ln(30)
+
+# #Save the PDF Document
+# document.output(PersonName + ' - Skills Profile Report.pdf')
