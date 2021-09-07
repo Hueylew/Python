@@ -113,3 +113,10 @@ st.dataframe(all_data)
 st.dataframe(dfCategory)
 st.altair_chart(chart)
 st.altair_chart(chart1)
+
+# Create sidebar
+st.sidebar.subheader('Dashboard Options')
+params={'Categories' : st.sidebar.selectbox('Categories', ('Analytical thinking and problem solving','Communication skills','Interaction skills','KCM Author',))}
+
+dfSidebar = all_data[all_data['Category']==params['Categories']]
+dfSidebar.reset_index()
