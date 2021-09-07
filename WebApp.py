@@ -1,7 +1,10 @@
 from matplotlib import colors
 import openpyxl
 import os
+from openpyxl.utils.cell import column_index_from_string
 import xlsxwriter
+import altair as alt
+from altair import *
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -11,6 +14,7 @@ import glob
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_interval
 import re
+
 
 def load_workbook_range(range_string, ws):
 	col_start, col_end = re.findall("[A-Z]+", range_string)
@@ -77,8 +81,8 @@ df_BA.at[72,'Category']='Integration'
 df_BA.at[74:75,'Category']='BDX'
 
 all_data = df_BA
-
 all_data.fillna('', inplace=True)
+
 new_header = all_data.iloc[0] 
 all_data = all_data[1:] 
 all_data.columns = new_header
@@ -90,6 +94,9 @@ df = all_data
 dfCategory = all_data.groupby('Category')['Skill Level'].mean().sort_values(ascending=False)
 fig = px.bar(df, x="Category", y="Skill Level", title='Score by Category',orientation='v')
 
+chart = alt.Chart(all_data).mark_bar().encode(x='Category', y='Skill Level')
+
+
 st.set_page_config(page_title='Skills Profiles')
 st.header(' ACT Skills Profiles Results 2021')
 st.subheader(PersonName)
@@ -98,3 +105,4 @@ st.dataframe(all_data)
 st.dataframe(dfCategory)
 st.plotly_chart(fig)
 st.plotly_chart(figScores)
+st.altair_chart(chart)
