@@ -46,14 +46,13 @@ YearsGI = sh["B6"].value
 YearsBA = sh["B7"].value
 YearsSSP = sh["B8"].value
 
-#Create the data frame
+#Create the scores data frame
 from itertools import islice
 ws = wb["Details"]
 df_Scores = load_workbook_range('B22:K24', ws)
 df_Scores = df_Scores.rename(columns={'B': '','C': 'Select','D': 'Pure Ins', 'E': 'SSP Broker', 'F': 'IQH', 'G': 'ACT', 'H': 'Common Components', 'I': 'Domain', 'J': 'BA', 'K': 'Architecture'})
-print(df_Scores)
 	
-#Create the data frame
+#Create the ACT data frame
 from itertools import islice
 ws = wb["ACT"]
 df_BA = load_workbook_range('A1:C77', ws)
@@ -86,16 +85,25 @@ all_data.fillna('', inplace=True)
 new_header = all_data.iloc[0] 
 all_data = all_data[1:] 
 all_data.columns = new_header
-dfCategory = all_data.groupby('Category')['Skill Level'].mean().sort_values(ascending=False)
+dfCategory = all_data.groupby('Category')['Skill Level'].mean('').sort_values(ascending=False)
 
-figScores = px.bar(df_Scores, x='ACT', y='', orientation='h')
+chart = alt.Chart(all_data).mark_bar().encode(alt.X('Category', sort=None,axis=alt.Axis(labelAngle=-45)), y='Skill Level').properties(title='Average Score by Category', width=1000, height=650)
+chart = chart.configure_title(
+    fontSize=30,
+    font='Aileron',
+    anchor='start',
+    color='gray'
+)
+chart.save('chart.html')
 
-df = all_data
-dfCategory = all_data.groupby('Category')['Skill Level'].mean().sort_values(ascending=False)
-fig = px.bar(df, x="Category", y="Skill Level", title='Score by Category',orientation='v')
-
-chart = alt.Chart(all_data).mark_bar().encode(x='Category', y='Skill Level')
-
+chart1 = alt.Chart(all_data).mark_bar().encode(alt.X('Topic', sort=None,axis=alt.Axis(labelAngle=-45)), y='Skill Level').properties(title='Score by Topic', width=1000, height=650)
+chart1 = chart1.configure_title(
+    fontSize=30,
+    font='Aileron',
+    anchor='start',
+    color='gray'
+)
+chart1.save('chart1.html')
 
 st.set_page_config(page_title='Skills Profiles')
 st.header(' ACT Skills Profiles Results 2021')
@@ -103,6 +111,5 @@ st.subheader(PersonName)
 st.dataframe(df_Scores)
 st.dataframe(all_data)
 st.dataframe(dfCategory)
-st.plotly_chart(fig)
-st.plotly_chart(figScores)
 st.altair_chart(chart)
+st.altair_chart(chart1)
