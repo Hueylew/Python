@@ -1,3 +1,4 @@
+from logging import Filter
 from matplotlib import colors
 import openpyxl
 import os
@@ -15,7 +16,6 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_interval
 import re
 
-
 def load_workbook_range(range_string, ws):
 	col_start, col_end = re.findall("[A-Z]+", range_string)
 	
@@ -25,12 +25,24 @@ def load_workbook_range(range_string, ws):
 		
 	return pd.DataFrame(data_rows, columns=get_column_interval(col_start, col_end))
 
-# Read all spreadsheets in the named folder below
-all_data = pd.DataFrame()
-f = ('/Users/adamlewis/Documents/Work/Business Consultancy/Skills and Development/Combined Skills Profiles 2021/Billy May - Skills Profile.xlsx')
+# Create sidebar
+st.set_page_config(page_title='Skills Profiles')
+st.sidebar.subheader('Dashboard Options')
+display = ['Adam Lewis','Alex Bandini','Andrew Wilcock','Ankit Singh','Arnold Kaswa','Badimu Kazadi','Billy May','Charles Chabala','Claude Seabi',
+'Daniso Mushaike','David Newson','Doctor Bokisi', 'Donna Cochrane', 'Gemal Dabab', 'Grant Smalley', 'Jalal Saleem', 'Kamogelo Matiou','Khanyisa Makhubela',
+'Michelle Padyachee','Mo Harmen', 'Muhammad Adam','Palesa Khantsi','Phuluso Ramulifho','Prevesh Kuni','Rachna Kumar','Ratidzo Marowatsanga','Richard Heath',
+'Saumitra Bhatnagar','Stephanie Davis','Steve Deas','Sucheta Mohan','Tebello Khesa','Teboho Monareng','Terry Ndou','Thinh Nguyen','Wing Chan']
+result = st.sidebar.selectbox('Select team member', display)
+businessAreas = ['ACT','Architecture','BA','Domain','IQH','Pure Ins','Select']
+businessAreasResult = st.sidebar.selectbox('Business Area', businessAreas)
+FilterCategories = ('Analytical thinking and problem solving','Communication skills','Interaction skills','KCM Author')
+Catresult = st.sidebar.selectbox('Categories', FilterCategories)
 
-# Get the persons name
-	
+# Read the spreadsheet for the selected person from the sidebar above
+all_data = pd.DataFrame()
+f = ('/Users/adamlewis/Documents/Work/Business Consultancy/Skills and Development/Combined Skills Profiles 2021 copy/' + result + ' - Skills Profile.xlsx')
+
+# Get personal information from the Details sheet
 from openpyxl import load_workbook
 wb = load_workbook(f, data_only=True)
 sh = wb["Details"]
@@ -87,36 +99,30 @@ all_data = all_data[1:]
 all_data.columns = new_header
 dfCategory = all_data.groupby('Category')['Skill Level'].mean('').sort_values(ascending=False)
 
-chart = alt.Chart(all_data).mark_bar().encode(alt.X('Category', sort=None,axis=alt.Axis(labelAngle=-45)), y='Skill Level').properties(title='Average Score by Category', width=1000, height=650)
+
+chart = alt.Chart(all_data).mark_bar().encode(alt.X('Category', sort=None,axis=alt.Axis(labelAngle=-45)), y='Skill Level').properties(title='Average Score by Category', width=1600, height=900)
 chart = chart.configure_title(
     fontSize=30,
-    font='Aileron',
+    font='Helvetica',
     anchor='start',
     color='gray'
 )
 chart.save('chart.html')
 
-chart1 = alt.Chart(all_data).mark_bar().encode(alt.X('Topic', sort=None,axis=alt.Axis(labelAngle=-45)), y='Skill Level').properties(title='Score by Topic', width=1000, height=650)
+#Create the chart show all topics and associated skill level
+chart1 = alt.Chart(all_data).mark_bar().encode(alt.X('Topic', sort=None,axis=alt.Axis(labelAngle=-45)), y='Skill Level').properties(title='Score by Topic', width=1600, height=900)
 chart1 = chart1.configure_title(
     fontSize=30,
-    font='Aileron',
+    font='Helvetica',
     anchor='start',
     color='gray'
 )
 chart1.save('chart1.html')
 
-st.set_page_config(page_title='Skills Profiles')
-st.header(' ACT Skills Profiles Results 2021')
-st.subheader(PersonName)
+#Create rest of streamlit page
+st.header(PersonName + ' - ' + businessAreasResult)
 st.dataframe(df_Scores)
-st.dataframe(all_data)
-st.dataframe(dfCategory)
+#st.dataframe(all_data)
+#st.dataframe(dfCategory)
 st.altair_chart(chart)
 st.altair_chart(chart1)
-
-# Create sidebar
-st.sidebar.subheader('Dashboard Options')
-params={'Categories' : st.sidebar.selectbox('Categories', ('Analytical thinking and problem solving','Communication skills','Interaction skills','KCM Author',))}
-
-dfSidebar = all_data[all_data['Category']==params['Categories']]
-dfSidebar.reset_index()
