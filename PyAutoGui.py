@@ -4,8 +4,9 @@ import pyautogui
 import webbrowser
 import os
 
-os.system("open /Applications/Safari.app http://192.168.0.85:8181/tos/")
-
-pyautogui.doubleClick(x = 36, y = 197 )
+# pyautogui.mouseInfo()
+# os.system("open /Applications/Safari.app http://192.168.0.85:8181/tos/")
+# os.system('open /Applications/Folx.app')
 pyautogui.PAUSE = 1
-pyautogui.write(['Test','enter'])
+pyautogui.leftClick(x = 1130, y = 8 )
+pyautogui.leftClick(x = 1143, y = 41 )
