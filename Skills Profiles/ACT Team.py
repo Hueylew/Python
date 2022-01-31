@@ -23,7 +23,7 @@ def load_workbook_range(range_string, ws):
 # Read all spreadsheets in the named folder below
 all_data = pd.DataFrame()
 index = 0
-for f in glob.glob('/Users/adamlewis/Documents/Work/Business Consultancy/Skills and Development/Combined Skills Profiles 2021/*.xlsx'):
+for f in glob.glob('/Users/adamlewis/Documents/Work/Business Consultancy/Skills and Development/Combined Skills Profiles 2021 copy/*.xlsx'):
 	index += 1
 	# Get the persons name
 	
