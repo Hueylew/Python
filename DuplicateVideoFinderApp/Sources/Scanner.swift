@@ -50,18 +50,53 @@ struct VideoFile: Identifiable, Hashable {
         return "\(w)x\(h)"
     }
 
+    /// Bitrate in ~1.4% buckets. Bucketing rather than comparing raw doubles
+    /// keeps the ordering transitive (required by sort) while stopping a
+    /// meaningless fraction-of-a-percent difference from outranking a clearly
+    /// better filename.
+    var bitrateBucket: Int {
+        guard let b = bitrate, b > 0 else { return 0 }
+        return Int((log2(b) * 50).rounded())
+    }
+
+    /// Rough "would a human recognise this name?" score. A downloader's UUID or
+    /// hash scores 0; a name built from real words scores higher. Only ever used
+    /// to break ties between copies of equal picture quality.
+    var nameScore: Int {
+        let stem = url.deletingPathExtension().lastPathComponent
+        if UUID(uuidString: stem) != nil { return 0 }
+
+        var score = 0
+        for token in stem.split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+            // a long hex run is a hash, not a word — skip it whole, or its
+            // accidental "bee"/"aff" fragments would score like real words
+            if token.count >= 12, token.allSatisfy(\.isHexDigit) { continue }
+
+            // score the letter runs inside, so "pantyhose18963" still counts
+            for word in token.split(whereSeparator: { !$0.isLetter }) {
+                guard word.count >= 3 else { continue }
+                // vowels are what rule out tokens like "XWPXAHDM"
+                let vowels = word.filter { "aeiouAEIOU".contains($0) }.count
+                guard Double(vowels) / Double(word.count) >= 0.2 else { continue }
+                score += word.count
+            }
+        }
+        return score
+    }
+
     /// Rank by how much picture information a copy retains. Resolution
-    /// dominates; at equal resolution more bits per second means less
-    /// compression damage; size is the final tiebreak.
-    var qualityKey: (Int, Double, Int64) { (pixels, bitrate ?? 0, size) }
+    /// dominates; then bits per second, since that's real compression damage.
+    /// Only once those tie does the filename decide — a name is trivially
+    /// fixable, lost picture detail is not.
+    var qualityKey: (Int, Int, Int, Int64) { (pixels, bitrateBucket, nameScore, size) }
 }
 
 func betterQuality(_ a: VideoFile, _ b: VideoFile) -> Bool {
-    let (ap, ab, asz) = a.qualityKey
-    let (bp, bb, bsz) = b.qualityKey
-    if ap != bp { return ap > bp }
-    if ab != bb { return ab > bb }
-    return asz > bsz
+    let x = a.qualityKey, y = b.qualityKey
+    if x.0 != y.0 { return x.0 > y.0 }
+    if x.1 != y.1 { return x.1 > y.1 }
+    if x.2 != y.2 { return x.2 > y.2 }
+    return x.3 > y.3
 }
 
 struct DuplicateGroup: Identifiable {
@@ -79,7 +114,8 @@ struct DuplicateGroup: Identifiable {
         let best = bestCopy
         let others = files.dropFirst()
         if others.contains(where: { best.pixels > $0.pixels }) { return "highest resolution" }
-        if others.contains(where: { (best.bitrate ?? 0) > ($0.bitrate ?? 0) }) { return "highest bitrate" }
+        if others.contains(where: { best.bitrateBucket > $0.bitrateBucket }) { return "highest bitrate" }
+        if others.contains(where: { best.nameScore > $0.nameScore }) { return "clearest filename" }
         return "largest file"
     }
 
