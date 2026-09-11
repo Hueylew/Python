@@ -135,47 +135,60 @@ final class ScanModel: ObservableObject {
         }
 
         let total = targets.reduce(Int64(0)) { $0 + $1.size }
+        // Network volumes never have a Trash, so name them in the confirmation:
+        // it's the one chance to say which files won't be recoverable.
+        let noTrashVolumes = Set(targets.filter { !isOnLocalVolume($0.url) }
+                                        .map { volumeName(for: $0.url) }).sorted()
+
         let confirm = NSAlert()
-        confirm.messageText = "Move \(targets.count) file(s) to the Trash?"
-        confirm.informativeText = "That frees \(humanSize(total)). "
-            + "They go to the Trash, so you can still get them back."
-        confirm.addButton(withTitle: "Move to Trash")
+        confirm.messageText = "Delete \(targets.count) file(s)?"
+        var text = "That frees \(humanSize(total)).\n\n"
+            + "Files on a volume that has a Trash go there and can be recovered. "
+            + "Volumes without one — network shares, some external disks — are "
+            + "deleted straight away."
+        if !noTrashVolumes.isEmpty {
+            text += "\n\n\(noTrashVolumes.joined(separator: ", ")) "
+                + (noTrashVolumes.count == 1 ? "has" : "have")
+                + " no Trash, so those deletions are permanent."
+        }
+        confirm.informativeText = text
+        confirm.addButton(withTitle: "Delete")
         confirm.addButton(withTitle: "Cancel")
         confirm.alertStyle = .warning
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
 
-        var removed = Set<UUID>()
+        var trashed = Set<UUID>()
+        var deleted = Set<UUID>()
         var failures: [String] = []
-        var noTrash: [VideoFile] = []   // volume has no Trash (network/exFAT shares)
 
         for f in targets {
             do {
                 try FileManager.default.trashItem(at: f.url, resultingItemURL: nil)
-                removed.insert(f.id)
+                trashed.insert(f.id)
             } catch let e as NSError
                 where e.domain == NSCocoaErrorDomain && e.code == NSFeatureUnsupportedError {
-                noTrash.append(f)
+                // No Trash on this volume. The confirmation said so — just delete.
+                do {
+                    try FileManager.default.removeItem(at: f.url)
+                    deleted.insert(f.id)
+                } catch {
+                    failures.append("\(f.name): \(error.localizedDescription)")
+                }
             } catch {
                 failures.append("\(f.name): \(error.localizedDescription)")
             }
         }
 
-        var note: String?
-        if !noTrash.isEmpty {
-            let outcome = handleVolumeWithoutTrash(noTrash)
-            removed.formUnion(outcome.removed)
-            failures.append(contentsOf: outcome.failures)
-            note = outcome.note
-        }
-
-        purgeFromResults(removed)
+        purgeFromResults(trashed.union(deleted))
 
         var lines: [String] = []
-        if removed.count > 0 { lines.append("\(removed.count) file(s) removed.") }
-        if let note { lines.append(note) }
+        if !trashed.isEmpty { lines.append("\(trashed.count) moved to the Trash.") }
+        if !deleted.isEmpty {
+            lines.append("\(deleted.count) deleted permanently (that volume has no Trash).")
+        }
         if !failures.isEmpty {
             lines.append("")
-            lines.append("Could not remove \(failures.count):")
+            lines.append("Could not delete \(failures.count):")
             lines.append(contentsOf: failures.prefix(15))
             if failures.count > 15 { lines.append("…and \(failures.count - 15) more.") }
         }
@@ -183,114 +196,8 @@ final class ScanModel: ObservableObject {
                          message: lines.joined(separator: "\n"))
     }
 
-    /// Some volumes — network shares, and many exFAT/FAT disks — have no Trash
-    /// at all, so `trashItem` refuses. Rather than silently deleting for real,
-    /// offer to move the files aside into a folder on that same volume: it's an
-    /// instant rename rather than a copy, and it stays undoable.
-    private func handleVolumeWithoutTrash(
-        _ files: [VideoFile]
-    ) -> (removed: Set<UUID>, failures: [String], note: String?) {
-        let volumes = Set(files.map { volumeName(for: $0.url) }).sorted()
-        let volumeList = volumes.joined(separator: ", ")
-        let folderName = "Duplicate Video Finder — To Delete"
-
-        let choice = NSAlert()
-        choice.messageText = "\(files.count) file(s) can't go to the Trash"
-        choice.informativeText = """
-            The volume \(volumeList) has no Trash — that's normal for network \
-            shares and most exFAT drives.
-
-            Moving them into a “\(folderName)” folder on that same volume is \
-            instant (nothing is copied) and you can still change your mind. \
-            Delete that folder yourself once you're happy.
-            """
-        choice.addButton(withTitle: "Move to Folder on \(volumes.count == 1 ? volumeList : "Each Volume")")
-        choice.addButton(withTitle: "Leave Them Alone")
-        choice.addButton(withTitle: "Delete Permanently")
-        choice.alertStyle = .warning
-
-        switch choice.runModal() {
-        case .alertFirstButtonReturn:
-            return relocate(files, intoFolderNamed: folderName)
-        case .alertThirdButtonReturn:
-            let sure = NSAlert()
-            sure.messageText = "Permanently delete \(files.count) file(s)?"
-            sure.informativeText = "This cannot be undone — they do not go to the Trash."
-            sure.addButton(withTitle: "Cancel")
-            sure.addButton(withTitle: "Delete Permanently")
-            sure.alertStyle = .critical
-            guard sure.runModal() == .alertSecondButtonReturn else {
-                return ([], [], "Left \(files.count) file(s) where they were.")
-            }
-            return deleteForever(files)
-        default:
-            return ([], [], "Left \(files.count) file(s) where they were.")
-        }
-    }
-
-    private func relocate(
-        _ files: [VideoFile], intoFolderNamed folderName: String
-    ) -> (removed: Set<UUID>, failures: [String], note: String?) {
-        var removed = Set<UUID>()
-        var failures: [String] = []
-        var destinations = Set<String>()
-        let fm = FileManager.default
-
-        for f in files {
-            guard let root = volumeRoot(for: f.url) else {
-                failures.append("\(f.name): could not work out which volume it's on")
-                continue
-            }
-            let folder = root.appendingPathComponent(folderName, isDirectory: true)
-            do {
-                try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-                try fm.moveItem(at: f.url, to: uniqueDestination(in: folder, for: f.url))
-                removed.insert(f.id)
-                destinations.insert(folder.path)
-            } catch {
-                failures.append("\(f.name): \(error.localizedDescription)")
-            }
-        }
-
-        let note = destinations.isEmpty ? nil
-            : "Moved aside into:\n" + destinations.sorted().joined(separator: "\n")
-        return (removed, failures, note)
-    }
-
-    private func deleteForever(
-        _ files: [VideoFile]
-    ) -> (removed: Set<UUID>, failures: [String], note: String?) {
-        var removed = Set<UUID>()
-        var failures: [String] = []
-        for f in files {
-            do {
-                try FileManager.default.removeItem(at: f.url)
-                removed.insert(f.id)
-            } catch {
-                failures.append("\(f.name): \(error.localizedDescription)")
-            }
-        }
-        return (removed, failures, removed.isEmpty ? nil
-                : "\(removed.count) file(s) deleted permanently.")
-    }
-
-    /// Never overwrite something already sitting in the destination folder.
-    private func uniqueDestination(in folder: URL, for source: URL) -> URL {
-        let fm = FileManager.default
-        let ext = source.pathExtension
-        let stem = source.deletingPathExtension().lastPathComponent
-        var candidate = folder.appendingPathComponent(source.lastPathComponent)
-        var n = 2
-        while fm.fileExists(atPath: candidate.path) {
-            let name = ext.isEmpty ? "\(stem) (\(n))" : "\(stem) (\(n)).\(ext)"
-            candidate = folder.appendingPathComponent(name)
-            n += 1
-        }
-        return candidate
-    }
-
-    private func volumeRoot(for url: URL) -> URL? {
-        (try? url.resourceValues(forKeys: [.volumeURLKey]))?.volume
+    private func isOnLocalVolume(_ url: URL) -> Bool {
+        (try? url.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? true
     }
 
     private func volumeName(for url: URL) -> String {
