@@ -1,0 +1,87 @@
+import Foundation
+
+// ── Result of running an external process ─────────────────────────────────────
+struct RunResult {
+    var status: Int32
+    var out: Data
+    var err: String
+    var timedOut: Bool
+
+    var outText: String { String(data: out, encoding: .utf8) ?? "" }
+}
+
+/// Run an external command, capturing stdout as raw bytes (frame data is binary),
+/// with an optional hard timeout.
+func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? = nil) -> RunResult {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: launchPath)
+    proc.arguments = args
+
+    let outPipe = Pipe()
+    let errPipe = Pipe()
+    proc.standardOutput = outPipe
+    proc.standardError = errPipe
+
+    let ioQueue = DispatchQueue(label: "proc.io")
+    var outData = Data()
+    var errData = Data()
+    outPipe.fileHandleForReading.readabilityHandler = { h in
+        let d = h.availableData
+        if !d.isEmpty { ioQueue.sync { outData.append(d) } }
+    }
+    errPipe.fileHandleForReading.readabilityHandler = { h in
+        let d = h.availableData
+        if !d.isEmpty { ioQueue.sync { errData.append(d) } }
+    }
+
+    do {
+        try proc.run()
+    } catch {
+        return RunResult(status: -1, out: Data(),
+                         err: "failed to launch \(launchPath): \(error)", timedOut: false)
+    }
+
+    var timedOut = false
+    if let timeout = timeout {
+        let sem = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async { proc.waitUntilExit(); sem.signal() }
+        if sem.wait(timeout: .now() + timeout) == .timedOut {
+            timedOut = true
+            proc.terminate()
+            if sem.wait(timeout: .now() + 5) == .timedOut, proc.isRunning {
+                kill(proc.processIdentifier, SIGKILL)
+            }
+        }
+    } else {
+        proc.waitUntilExit()
+    }
+
+    outPipe.fileHandleForReading.readabilityHandler = nil
+    errPipe.fileHandleForReading.readabilityHandler = nil
+    if let rest = try? outPipe.fileHandleForReading.readToEnd() { ioQueue.sync { outData.append(rest) } }
+    if let rest = try? errPipe.fileHandleForReading.readToEnd() { ioQueue.sync { errData.append(rest) } }
+
+    return ioQueue.sync {
+        RunResult(status: proc.terminationStatus, out: outData,
+                  err: String(data: errData, encoding: .utf8) ?? "", timedOut: timedOut)
+    }
+}
+
+/// Locate ffmpeg/ffprobe. The copies bundled inside the .app win, so the app
+/// keeps working on a Mac with no Homebrew; a system install is the fallback.
+func findTool(_ name: String) -> String? {
+    let fm = FileManager.default
+    if let res = Bundle.main.resourceURL {
+        let bundled = res.appendingPathComponent("bin/\(name)").path
+        if fm.isExecutableFile(atPath: bundled) { return bundled }
+    }
+    var dirs = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    if let path = ProcessInfo.processInfo.environment["PATH"] {
+        dirs = path.split(separator: ":").map(String.init) + dirs
+    }
+    for d in dirs {
+        let p = d + "/" + name
+        if fm.isExecutableFile(atPath: p) { return p }
+    }
+    return nil
+}
