@@ -11,9 +11,17 @@ let durationToleranceSec = 2.0
 let samplePositions = [0.25, 0.5, 0.75]
 let maxHammingPerFrame = 10  // out of 64 bits; higher = looser match
 
-// Reading big files is the bottleneck, so past ~4 concurrent readers a typical
-// external drive just thrashes. Measured 1→23.5s, 2→16.5s, 4→14.9s, 8→15.2s.
-let maxWorkers = min(4, ProcessInfo.processInfo.activeProcessorCount)
+// A local disk is seek-bound: measured on a USB video library, 1→23.5s,
+// 2→16.5s, 4→14.9s, 8→15.2s — past ~4 concurrent readers it just thrashes.
+// A network share is latency-bound instead (most of the wall clock is round
+// trips, not platter movement), so it wants far more requests in flight.
+func workerCount(for folders: [URL]) -> Int {
+    let cores = ProcessInfo.processInfo.activeProcessorCount
+    let anyRemote = folders.contains { url in
+        ((try? url.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? true) == false
+    }
+    return anyRemote ? max(12, cores) : min(4, cores)
+}
 
 enum Tools {
     static let ffmpeg = findTool("ffmpeg")
@@ -31,6 +39,7 @@ struct VideoFile: Identifiable, Hashable {
     let id = UUID()
     let url: URL
     let size: Int64
+    var mtime: Double = 0        // with size, this is the cache key
     var duration: Double?
     var width: Int?
     var height: Int?
@@ -168,56 +177,107 @@ func concurrentMap<T, R>(_ items: [T], limit: Int, cancel: CancelToken,
 // ── File discovery ───────────────────────────────────────────────────────────
 func findVideoFiles(in folders: [URL]) -> [URL] {
     let fm = FileManager.default
-    var seen = Set<String>()
     var results: [URL] = []
+    var seen = Set<String>()
 
-    for folder in folders {
+    // Resolve overlap once per folder rather than per file: asking each file for
+    // its canonical path is a fresh filesystem round trip, which on a network
+    // share costs more than everything else in this step put together.
+    var roots: [URL] = []
+    for folder in folders.map({ $0.resolvingSymlinksInPath().standardizedFileURL }) {
+        let path = folder.path.hasSuffix("/") ? folder.path : folder.path + "/"
+        // drop anything already covered by a folder we're keeping
+        if roots.contains(where: { path.hasPrefix($0.path.hasSuffix("/") ? $0.path : $0.path + "/") }) {
+            continue
+        }
+        roots.removeAll { $0.path.hasPrefix(path) }
+        roots.append(folder)
+    }
+
+    for folder in roots {
         guard let e = fm.enumerator(at: folder,
-                                    includingPropertiesForKeys: [.isRegularFileKey],
+                                    includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
                                     options: [.skipsHiddenFiles]) else { continue }
         for case let url as URL in e {
-            let name = url.lastPathComponent
-            if name.hasPrefix("._") { continue }  // macOS AppleDouble sidecar
+            if url.lastPathComponent.hasPrefix("._") { continue }  // AppleDouble sidecar
             guard videoExtensions.contains(url.pathExtension.lowercased()) else { continue }
-            let values = try? url.resourceValues(forKeys: [.isRegularFileKey])
-            guard values?.isRegularFile == true else { continue }
-            let key = (try? url.resourceValues(forKeys: [.canonicalPathKey]).canonicalPath) ?? url.path
-            if seen.insert(key).inserted { results.append(url) }
+            // prefetched above, so this costs nothing
+            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
+            else { continue }
+            if seen.insert(url.standardizedFileURL.path).inserted { results.append(url) }
         }
     }
     return results
 }
 
 // ── Metadata ─────────────────────────────────────────────────────────────────
-func buildVideoFile(_ url: URL) -> VideoFile? {
-    guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-          let size = attrs[.size] as? Int64 else { return nil }
-    var vf = VideoFile(url: url, size: size)
+func buildVideoFile(_ url: URL, cache: ScanCache? = nil) -> VideoFile? {
+    guard let stamp = fileStamp(url) else { return nil }
+    var vf = VideoFile(url: url, size: stamp.size, mtime: stamp.mtime)
 
+    // Unchanged since last time? Then ffprobe already told us everything.
+    if let e = cache?.entry(for: url.path, size: stamp.size, mtime: stamp.mtime), e.probed {
+        vf.duration = e.duration
+        vf.width = e.width
+        vf.height = e.height
+        vf.codec = e.codec
+        return vf
+    }
+
+    // Nothing to probe with: don't record a verdict we'd be stuck with if
+    // ffmpeg gets installed later.
     guard let ffprobe = Tools.ffprobe else { return vf }
+
     let r = runProcess(ffprobe, [
         "-v", "quiet", "-print_format", "json",
         "-show_format", "-show_streams", "-select_streams", "v:0", url.path,
     ], timeout: 30)
-    guard r.status == 0,
-          let json = try? JSONSerialization.jsonObject(with: r.out) as? [String: Any]
-    else { return vf }
 
-    let streams = json["streams"] as? [[String: Any]] ?? []
-    let format = json["format"] as? [String: Any] ?? [:]
+    if r.status == 0,
+       let json = try? JSONSerialization.jsonObject(with: r.out) as? [String: Any] {
+        let streams = json["streams"] as? [[String: Any]] ?? []
+        let format = json["format"] as? [String: Any] ?? [:]
 
-    if let d = format["duration"] as? String, let v = Double(d) { vf.duration = v }
-    else if let d = streams.first?["duration"] as? String, let v = Double(d) { vf.duration = v }
+        if let d = format["duration"] as? String, let v = Double(d) { vf.duration = v }
+        else if let d = streams.first?["duration"] as? String, let v = Double(d) { vf.duration = v }
 
-    if let s = streams.first {
-        vf.width = s["width"] as? Int
-        vf.height = s["height"] as? Int
-        vf.codec = s["codec_name"] as? String
+        if let s = streams.first {
+            vf.width = s["width"] as? Int
+            vf.height = s["height"] as? Int
+            vf.codec = s["codec_name"] as? String
+        }
     }
+
+    // Record the outcome even when ffprobe found nothing, so a file it can't
+    // read isn't re-probed on every future scan.
+    cache?.storeMetadata(path: url.path, size: stamp.size, mtime: stamp.mtime,
+                         duration: vf.duration, width: vf.width,
+                         height: vf.height, codec: vf.codec)
     return vf
 }
 
 // ── Exact hashing ────────────────────────────────────────────────────────────
+/// Hash a small slice from each end of the file. Cheap enough to be free even
+/// over a network share, and enough to separate same-size files that aren't
+/// actually the same. Only ever used to decide who deserves a real full hash.
+func edgeFingerprint(_ url: URL, window: Int = 64 * 1024) -> String? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+
+    var hasher = SHA256()
+    guard let head = try? handle.read(upToCount: window) else { return nil }
+    hasher.update(data: head)
+
+    if let size = try? handle.seekToEnd(), size > UInt64(window) {
+        let tailStart = size - UInt64(window)
+        if (try? handle.seek(toOffset: tailStart)) != nil,
+           let tail = try? handle.read(upToCount: window) {
+            hasher.update(data: tail)
+        }
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+}
+
 func hashFileContents(_ url: URL) -> String? {
     guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
     defer { try? handle.close() }
@@ -251,14 +311,16 @@ func frameHash(_ url: URL, at seconds: Double) -> UInt64? {
     return bits
 }
 
-func computeSignature(_ vf: VideoFile) -> [UInt64]? {
-    guard let duration = vf.duration, duration > 0 else { return nil }
-    var hashes: [UInt64] = []
-    for frac in samplePositions {
-        guard let h = frameHash(vf.url, at: max(0, duration * frac)) else { return nil }
-        hashes.append(h)
+/// One frame of a cluster's signature, served from the cache when the file
+/// hasn't changed since it was last sampled.
+func clusterFrame(_ c: ByteCluster, stage: Int, cache: ScanCache?) -> UInt64? {
+    let vf = c.files[0]
+    if let e = cache?.entry(for: vf.url.path, size: vf.size, mtime: vf.mtime),
+       let cached = e.signature, cached.count > stage {
+        return cached[stage]
     }
-    return hashes
+    guard let duration = vf.duration, duration > 0 else { return nil }
+    return frameHash(vf.url, at: max(0, duration * samplePositions[stage]))
 }
 
 func hamming(_ a: [UInt64], _ b: [UInt64]) -> Int {
@@ -271,7 +333,12 @@ func hamming(_ a: [UInt64], _ b: [UInt64]) -> Int {
 /// produce an identical frame hash, so one ffmpeg pass covers the whole cluster.
 final class ByteCluster {
     var files: [VideoFile]
-    var signature: [UInt64]?
+    /// Frames sampled so far, in `samplePositions` order. Filled in one pass at
+    /// a time — most clusters never need all of them.
+    var frames: [UInt64] = []
+    /// Sampling failed, so this cluster can't take part in a frame comparison.
+    var failed = false
+
     init(files: [VideoFile]) { self.files = files }
     var duration: Double? { files.first?.duration }
 }
@@ -290,20 +357,39 @@ struct UnionFind {
     }
 }
 
-func groupByExactHash(_ files: [VideoFile], cancel: CancelToken,
+func groupByExactHash(_ files: [VideoFile], workers: Int, cancel: CancelToken,
                       progress: @escaping (Int, Int, String) -> Void) -> [ByteCluster] {
     var bySize: [Int64: [VideoFile]] = [:]
     for f in files { bySize[f.size, default: []].append(f) }
 
     // only files sharing a size can possibly be byte-identical
-    let needHash = bySize.values.filter { $0.count > 1 }.flatMap { $0 }
+    let sameSize = bySize.values.filter { $0.count > 1 }.flatMap { $0 }
     var digests: [UUID: String] = [:]
-    if !needHash.isEmpty {
-        let hashed = concurrentMap(needHash, limit: maxWorkers, cancel: cancel,
-                                   onProgress: { d, t, f in progress(d, t, "Hashing \(f.name)") },
-                                   transform: { hashFileContents($0.url) })
-        for (i, h) in hashed.enumerated() {
-            if let h = h ?? nil { digests[needHash[i].id] = h }
+
+    if !sameSize.isEmpty {
+        // First pass: a few KB from each end. Files that differ show it here,
+        // which spares us streaming whole videos across the network to find out.
+        let edges = concurrentMap(sameSize, limit: workers, cancel: cancel,
+                                  onProgress: { d, t, f in progress(d, t, "Checking \(f.name)") },
+                                  transform: { edgeFingerprint($0.url) })
+        var byEdge: [String: [VideoFile]] = [:]
+        for (i, e) in edges.enumerated() {
+            let f = sameSize[i]
+            // unreadable ends: fall back to a full hash rather than guess
+            let key = (e ?? nil) ?? "unreadable-\(f.id)"
+            byEdge["\(f.size)-\(key)", default: []].append(f)
+        }
+
+        // Second pass: confirm the survivors properly. Matching ends are not
+        // proof, and these get deleted, so nothing is called exact on a sample.
+        let needHash = byEdge.values.filter { $0.count > 1 }.flatMap { $0 }
+        if !needHash.isEmpty {
+            let hashed = concurrentMap(needHash, limit: workers, cancel: cancel,
+                                       onProgress: { d, t, f in progress(d, t, "Hashing \(f.name)") },
+                                       transform: { hashFileContents($0.url) })
+            for (i, h) in hashed.enumerated() {
+                if let h = h ?? nil { digests[needHash[i].id] = h }
+            }
         }
     }
 
@@ -323,87 +409,152 @@ func groupByExactHash(_ files: [VideoFile], cancel: CancelToken,
     return clusters
 }
 
-func computeClusterSignatures(_ clusters: [ByteCluster], cancel: CancelToken,
-                              progress: @escaping (Int, Int, String) -> Void) {
+/// Only files whose duration is within tolerance of some other file can ever be
+/// matched by `mergeBySimilarity`. Everything else is decided before a single
+/// frame is read, so sampling it would be wasted work — and on a big library
+/// that's the overwhelming majority of the files.
+func clustersWorthSampling(_ clusters: [ByteCluster]) -> [ByteCluster] {
     let dated = clusters.filter { $0.duration != nil }
-    guard !dated.isEmpty else { return }
-    let sigs = concurrentMap(dated, limit: maxWorkers, cancel: cancel,
-                             onProgress: { d, t, c in
-                                 progress(d, t, "Sampling frames: \(c.files[0].name)")
-                             },
-                             transform: { computeSignature($0.files[0]) })
-    for (i, s) in sigs.enumerated() { dated[i].signature = s ?? nil }
+        .sorted { ($0.duration ?? 0) < ($1.duration ?? 0) }
+    guard dated.count > 1 else { return [] }
+
+    var worth: [ByteCluster] = []
+    for (i, c) in dated.enumerated() {
+        let d = c.duration ?? 0
+        // sorted, so the closest durations are the immediate neighbours
+        let nearPrev = i > 0 && d - (dated[i - 1].duration ?? 0) <= durationToleranceSec
+        let nearNext = i + 1 < dated.count && (dated[i + 1].duration ?? 0) - d <= durationToleranceSec
+        if nearPrev || nearNext { worth.append(c) }
+    }
+    return worth
 }
 
-/// Merge byte-clusters whose frames look alike, so a file that's an exact
-/// duplicate of A and another that's merely a re-encode of A land in the same
-/// group rather than the re-encode being dropped.
-func mergeBySimilarity(_ clusters: [ByteCluster]) -> [DuplicateGroup] {
-    let signed = clusters.filter { $0.signature != nil }
-        .sorted { ($0.duration ?? 0) < ($1.duration ?? 0) }
-    var uf = UnionFind(signed.count)
+/// Sample one frame at a time across the whole candidate set, discarding pairs
+/// that already can't match before paying for the next frame.
+///
+/// The verdict is unchanged: a pair still has to finish with its average
+/// distance within tolerance. It's only the order of work that differs. Because
+/// the remaining frames can never *reduce* a running total, any pair already
+/// past the budget after one frame is dead, and a cluster with no surviving
+/// partner never gets sampled again — which is most of them, since unrelated
+/// videos sit near the halfway mark of a 64-bit hash.
+func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
+                   cancel: CancelToken,
+                   progress: @escaping (Int, Int, String) -> Void) -> [DuplicateGroup] {
+    let pool = clustersWorthSampling(clusters)   // already sorted by duration
+    let budget = maxHammingPerFrame * samplePositions.count
 
-    for i in 0..<signed.count {
-        for j in (i + 1)..<signed.count {
-            let di = signed[i].duration ?? 0, dj = signed[j].duration ?? 0
-            if dj - di > durationToleranceSec { break }  // sorted — nothing further is in range
-            guard let a = signed[i].signature, let b = signed[j].signature else { continue }
-            if Double(hamming(a, b)) / Double(a.count) <= Double(maxHammingPerFrame) {
-                uf.union(i, j)
-            }
+    // every pair close enough in duration to be worth a look
+    var pairs: [(i: Int, j: Int, dist: Int)] = []
+    for i in 0..<pool.count {
+        for j in (i + 1)..<pool.count {
+            if (pool[j].duration ?? 0) - (pool[i].duration ?? 0) > durationToleranceSec { break }
+            pairs.append((i, j, 0))
         }
     }
 
+    for stage in 0..<samplePositions.count {
+        if pairs.isEmpty || cancel.isCancelled { break }
+
+        // only clusters still in a live pair need this frame
+        var needed = Set<Int>()
+        for p in pairs {
+            if pool[p.i].frames.count <= stage { needed.insert(p.i) }
+            if pool[p.j].frames.count <= stage { needed.insert(p.j) }
+        }
+
+        if !needed.isEmpty {
+            let todo = needed.sorted()
+            let got = concurrentMap(todo, limit: workers, cancel: cancel,
+                                    onProgress: { d, t, idx in
+                                        progress(d, t, "Pass \(stage + 1)/\(samplePositions.count): "
+                                                 + pool[idx].files[0].name)
+                                    },
+                                    transform: { clusterFrame(pool[$0], stage: stage, cache: cache) })
+            for (k, value) in got.enumerated() {
+                let c = pool[todo[k]]
+                if let h = value ?? nil {
+                    c.frames.append(h)
+                    let vf = c.files[0]
+                    cache?.storeSignature(path: vf.url.path, size: vf.size,
+                                          mtime: vf.mtime, signature: c.frames)
+                } else {
+                    c.failed = true
+                    let vf = c.files[0]
+                    // remember the failure, so a broken file isn't retried every scan
+                    cache?.storeSignature(path: vf.url.path, size: vf.size,
+                                          mtime: vf.mtime, signature: nil)
+                }
+            }
+        }
+
+        pairs = pairs.compactMap { p in
+            let a = pool[p.i], b = pool[p.j]
+            guard !a.failed, !b.failed,
+                  a.frames.count > stage, b.frames.count > stage else { return nil }
+            let d = p.dist + (a.frames[stage] ^ b.frames[stage]).nonzeroBitCount
+            return d > budget ? nil : (p.i, p.j, d)
+        }
+    }
+
+    var uf = UnionFind(pool.count)
+    for p in pairs { uf.union(p.i, p.j) }
+
     var byRoot: [Int: [Int]] = [:]
-    for i in 0..<signed.count { byRoot[uf.find(i), default: []].append(i) }
+    for i in 0..<pool.count { byRoot[uf.find(i), default: []].append(i) }
 
     var groups: [DuplicateGroup] = []
+    var accounted = Set<ObjectIdentifier>()
     for indices in byRoot.values {
-        let here = indices.map { signed[$0] }
+        let here = indices.map { pool[$0] }
         var files = here.flatMap { $0.files }
         guard files.count > 1 else { continue }
         files.sort(by: betterQuality)
         // "exact" only when a single byte-identical cluster is involved
         groups.append(DuplicateGroup(kind: here.count == 1 ? .exact : .possible, files: files))
+        for c in here { accounted.insert(ObjectIdentifier(c)) }
     }
 
-    // clusters we couldn't sample can still be reported if byte-identical
-    for c in clusters where c.signature == nil && c.files.count > 1 {
+    // byte-identical clusters that never took part in a frame match — including
+    // everything the duration filter skipped — are still duplicates
+    for c in clusters where c.files.count > 1 && !accounted.contains(ObjectIdentifier(c)) {
         groups.append(DuplicateGroup(kind: .exact, files: c.files.sorted(by: betterQuality)))
     }
     return groups
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
-func scan(folders: [URL], cancel: CancelToken,
+func scan(folders: [URL], cancel: CancelToken, cache: ScanCache? = ScanCache.load(),
           progress: @escaping (Int, Int, String) -> Void) -> [DuplicateGroup] {
+    let workers = workerCount(for: folders)
     progress(0, 0, "Step 1/4 — Finding video files…")
     let paths = findVideoFiles(in: folders)
     if cancel.isCancelled { return [] }
 
     var files: [VideoFile] = []
     if !paths.isEmpty {
-        let built = concurrentMap(paths, limit: maxWorkers, cancel: cancel,
+        let built = concurrentMap(paths, limit: workers, cancel: cancel,
                                   onProgress: { d, t, u in
                                       progress(d, t, "Step 2/4 — Reading metadata: \(u.lastPathComponent)")
                                   },
-                                  transform: { buildVideoFile($0) })
+                                  transform: { buildVideoFile($0, cache: cache) })
         files = built.compactMap { $0 ?? nil }
     }
-    if cancel.isCancelled { return [] }
+    if cancel.isCancelled { cache?.save(); return [] }
     files.sort { $0.url.path < $1.url.path }  // threads finish out of order
 
-    let clusters = groupByExactHash(files, cancel: cancel) { d, t, m in
+    let clusters = groupByExactHash(files, workers: workers, cancel: cancel) { d, t, m in
         progress(d, t, "Step 3/4 — Checking exact duplicates: \(m)")
     }
-    if cancel.isCancelled { return [] }
+    if cancel.isCancelled { cache?.save(); return [] }
 
-    computeClusterSignatures(clusters, cancel: cancel) { d, t, m in
+    var groups = matchClusters(clusters, workers: workers, cache: cache, cancel: cancel) { d, t, m in
         progress(d, t, "Step 4/4 — Checking for re-encoded duplicates: \(m)")
     }
+    // keep whatever we learned, even if the user cancels part-way
+    cache?.save()
     if cancel.isCancelled { return [] }
 
-    var groups = mergeBySimilarity(clusters)
     groups.sort { $0.wastedBytes > $1.wastedBytes }  // biggest wins first
     return groups
 }
