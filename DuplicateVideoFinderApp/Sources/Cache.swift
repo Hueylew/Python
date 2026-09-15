@@ -36,7 +36,10 @@ final class ScanCache: @unchecked Sendable {
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
                                             in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSTemporaryDirectory())
-        return base.appendingPathComponent("Duplicate Video Finder/cache.json")
+        // v2: frame hashes went from 64-bit to 256-bit. Reading a v1 signature
+        // as though it were v2 would silently compare the wrong bits, so the
+        // old file is left behind rather than migrated.
+        return base.appendingPathComponent("Duplicate Video Finder/cache-v2.json")
     }()
 
     let fileURL: URL

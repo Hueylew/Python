@@ -48,8 +48,12 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
         if sem.wait(timeout: .now() + timeout) == .timedOut {
             timedOut = true
             proc.terminate()
-            if sem.wait(timeout: .now() + 5) == .timedOut, proc.isRunning {
-                kill(proc.processIdentifier, SIGKILL)
+            if sem.wait(timeout: .now() + 5) == .timedOut {
+                if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+                // Wait for the kill to actually land. Asking a still-running
+                // task for its terminationStatus raises an ObjC exception that
+                // Swift cannot catch, which would take the whole app down.
+                _ = sem.wait(timeout: .now() + 5)
             }
         }
     } else {
@@ -61,8 +65,12 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
     if let rest = try? outPipe.fileHandleForReading.readToEnd() { ioQueue.sync { outData.append(rest) } }
     if let rest = try? errPipe.fileHandleForReading.readToEnd() { ioQueue.sync { errData.append(rest) } }
 
+    // Belt and braces: if it somehow outlived the kill, report a failure rather
+    // than asking for a status that would raise and terminate the process.
+    let status: Int32 = proc.isRunning ? -1 : proc.terminationStatus
+
     return ioQueue.sync {
-        RunResult(status: proc.terminationStatus, out: outData,
+        RunResult(status: status, out: outData,
                   err: String(data: errData, encoding: .utf8) ?? "", timedOut: timedOut)
     }
 }

@@ -9,7 +9,16 @@ let videoExtensions: Set<String> = [
 
 let durationToleranceSec = 2.0
 let samplePositions = [0.25, 0.5, 0.75]
-let maxHammingPerFrame = 10  // out of 64 bits; higher = looser match
+
+/// A frame is hashed as a 17x16 grey thumbnail compared left-to-right, giving
+/// 256 bits. The obvious 9x8 / 64-bit version is too coarse to be safe: on a
+/// folder of different clips from one camera session, distinct videos scored
+/// 4-23 while genuine re-encodes score 0-5 — the two populations overlap, so no
+/// threshold separates them. At 256 bits the same pairs scored 43-95 against 0
+/// for a true duplicate, which is a gap with nothing in it. It costs nothing:
+/// the same single ffmpeg call, returning 272 bytes instead of 72.
+let hashWordsPerFrame = 4                  // 4 x UInt64 = 256 bits
+let maxHammingPerFrame = 24                // out of 256; observed false floor was 43
 
 // A local disk is seek-bound: measured on a USB video library, 1→23.5s,
 // 2→16.5s, 4→14.9s, 8→15.2s — past ~4 concurrent readers it just thrashes.
@@ -291,33 +300,37 @@ func hashFileContents(_ url: URL) -> String? {
 // ── Perceptual hashing ───────────────────────────────────────────────────────
 /// Ask ffmpeg for one frame already scaled to 9x8 greyscale — that's exactly the
 /// 72 bytes a difference-hash needs, so no image decoding is required.
-func frameHash(_ url: URL, at seconds: Double) -> UInt64? {
+func frameHash(_ url: URL, at seconds: Double) -> [UInt64]? {
     guard let ffmpeg = Tools.ffmpeg else { return nil }
+    let (w, h) = (17, 16)                      // one extra column to compare against
     let r = runProcess(ffmpeg, [
         "-v", "quiet", "-ss", String(seconds), "-i", url.path,
-        "-frames:v", "1", "-vf", "scale=9:8", "-pix_fmt", "gray",
+        "-frames:v", "1", "-vf", "scale=\(w):\(h)", "-pix_fmt", "gray",
         "-f", "rawvideo", "-",
     ], timeout: 30)
-    guard r.status == 0, r.out.count >= 72 else { return nil }
+    guard r.status == 0, r.out.count >= w * h else { return nil }
 
-    let px = [UInt8](r.out.prefix(72))
-    var bits: UInt64 = 0
-    for row in 0..<8 {
-        for col in 0..<8 {
-            let i = row * 9 + col
-            bits = (bits << 1) | (px[i] > px[i + 1] ? 1 : 0)
+    let px = [UInt8](r.out.prefix(w * h))
+    var words = [UInt64](repeating: 0, count: hashWordsPerFrame)
+    var bit = 0
+    for row in 0..<h {
+        for col in 0..<(w - 1) {
+            let i = row * w + col
+            if px[i] > px[i + 1] { words[bit / 64] |= (1 << UInt64(bit % 64)) }
+            bit += 1
         }
     }
-    return bits
+    return words
 }
 
 /// One frame of a cluster's signature, served from the cache when the file
 /// hasn't changed since it was last sampled.
-func clusterFrame(_ c: ByteCluster, stage: Int, cache: ScanCache?) -> UInt64? {
+func clusterFrame(_ c: ByteCluster, stage: Int, cache: ScanCache?) -> [UInt64]? {
     let vf = c.files[0]
     if let e = cache?.entry(for: vf.url.path, size: vf.size, mtime: vf.mtime),
-       let cached = e.signature, cached.count > stage {
-        return cached[stage]
+       let cached = e.signature, cached.count >= (stage + 1) * hashWordsPerFrame {
+        let start = stage * hashWordsPerFrame
+        return Array(cached[start ..< start + hashWordsPerFrame])
     }
     guard let duration = vf.duration, duration > 0 else { return nil }
     return frameHash(vf.url, at: max(0, duration * samplePositions[stage]))
@@ -333,9 +346,9 @@ func hamming(_ a: [UInt64], _ b: [UInt64]) -> Int {
 /// produce an identical frame hash, so one ffmpeg pass covers the whole cluster.
 final class ByteCluster {
     var files: [VideoFile]
-    /// Frames sampled so far, in `samplePositions` order. Filled in one pass at
-    /// a time — most clusters never need all of them.
-    var frames: [UInt64] = []
+    /// Frames sampled so far, in `samplePositions` order, each one a 256-bit
+    /// hash. Filled a pass at a time — most clusters never need all of them.
+    var frames: [[UInt64]] = []
     /// Sampling failed, so this cluster can't take part in a frame comparison.
     var failed = false
 
@@ -477,7 +490,7 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
                     c.frames.append(h)
                     let vf = c.files[0]
                     cache?.storeSignature(path: vf.url.path, size: vf.size,
-                                          mtime: vf.mtime, signature: c.frames)
+                                          mtime: vf.mtime, signature: c.frames.flatMap { $0 })
                 } else {
                     c.failed = true
                     let vf = c.files[0]
@@ -492,23 +505,52 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
             let a = pool[p.i], b = pool[p.j]
             guard !a.failed, !b.failed,
                   a.frames.count > stage, b.frames.count > stage else { return nil }
-            let d = p.dist + (a.frames[stage] ^ b.frames[stage]).nonzeroBitCount
+            let d = p.dist + hamming(a.frames[stage], b.frames[stage])
             return d > budget ? nil : (p.i, p.j, d)
         }
     }
 
-    var uf = UnionFind(pool.count)
-    for p in pairs { uf.union(p.i, p.j) }
-
-    var byRoot: [Int: [Int]] = [:]
-    for i in 0..<pool.count { byRoot[uf.find(i), default: []].append(i) }
+    // Group only where every member matches every other member.
+    //
+    // Merging transitively (A~B, B~C therefore A+B+C) quietly breaks the
+    // duration rule: each link can sit inside the tolerance while the ends are
+    // far outside it. A folder of similar-looking clips then chains into one
+    // enormous group spanning durations that were never compared. Requiring
+    // mutual agreement keeps a group meaning what it says — everything in here
+    // is a duplicate of everything else in here.
+    var neighbours: [Int: Set<Int>] = [:]
+    for p in pairs {
+        neighbours[p.i, default: []].insert(p.j)
+        neighbours[p.j, default: []].insert(p.i)
+    }
 
     var groups: [DuplicateGroup] = []
     var accounted = Set<ObjectIdentifier>()
-    for indices in byRoot.values {
-        let here = indices.map { pool[$0] }
+    var taken = Set<Int>()
+
+    // strongest hub first, so the most-connected file anchors its group
+    let anchors = neighbours.keys.sorted {
+        let (a, b) = (neighbours[$0]?.count ?? 0, neighbours[$1]?.count ?? 0)
+        return a == b ? $0 < $1 : a > b
+    }
+
+    for anchor in anchors where !taken.contains(anchor) {
+        var members = [anchor]
+        // closest duration first, so the tightest matches win a contested file
+        let candidates = (neighbours[anchor] ?? []).subtracting(taken).sorted {
+            let base = pool[anchor].duration ?? 0
+            let da = abs((pool[$0].duration ?? 0) - base)
+            let db = abs((pool[$1].duration ?? 0) - base)
+            return da == db ? $0 < $1 : da < db
+        }
+        for c in candidates where members.allSatisfy({ neighbours[$0]?.contains(c) == true }) {
+            members.append(c)
+        }
+        guard members.count > 1 else { continue }
+
+        taken.formUnion(members)
+        let here = members.map { pool[$0] }
         var files = here.flatMap { $0.files }
-        guard files.count > 1 else { continue }
         files.sort(by: betterQuality)
         // "exact" only when a single byte-identical cluster is involved
         groups.append(DuplicateGroup(kind: here.count == 1 ? .exact : .possible, files: files))
