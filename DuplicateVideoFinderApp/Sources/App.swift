@@ -206,12 +206,21 @@ final class ScanModel: ObservableObject {
             }
         }
 
-        purgeFromResults(trashed.union(deleted))
+        let removed = trashed.union(deleted)
+        purgeFromResults(removed)
+        let cleared = removed.isEmpty ? [] : dropFinishedFolders()
 
         var lines: [String] = []
         if !trashed.isEmpty { lines.append("\(trashed.count) moved to the Trash.") }
         if !deleted.isEmpty {
             lines.append("\(deleted.count) deleted permanently (that volume has no Trash).")
+        }
+        if !cleared.isEmpty {
+            lines.append("")
+            lines.append("Nothing left to review in \(cleared.count) folder(s), "
+                         + "so they've been taken off the list:")
+            lines.append(contentsOf: cleared.prefix(10).map { "  " + $0.lastPathComponent })
+            if cleared.count > 10 { lines.append("  …and \(cleared.count - 10) more.") }
         }
         if !failures.isEmpty {
             lines.append("")
@@ -229,6 +238,28 @@ final class ScanModel: ObservableObject {
 
     private func volumeName(for url: URL) -> String {
         (try? url.resourceValues(forKeys: [.volumeNameKey]))?.volumeName ?? "that drive"
+    }
+
+    /// Once a folder has no duplicates left to review it's finished with, so
+    /// take it off the list — that's what makes working through a big library
+    /// folder by folder practical. A folder with groups still showing stays put,
+    /// so deleting only part of a batch doesn't lose your place.
+    private func dropFinishedFolders() -> [URL] {
+        let stillListed = groups.flatMap { $0.files }
+        let finished = folders.filter { folder in
+            !stillListed.contains { fileIsInside(folder, $0) }
+        }
+        guard !finished.isEmpty else { return [] }
+        let gone = Set(finished)
+        folders.removeAll { gone.contains($0) }
+        return finished
+    }
+
+    /// Scanning recurses, so a file counts as inside a folder at any depth.
+    private func fileIsInside(_ folder: URL, _ file: VideoFile) -> Bool {
+        let base = folder.standardizedFileURL.path
+        let prefix = base.hasSuffix("/") ? base : base + "/"
+        return file.url.standardizedFileURL.path.hasPrefix(prefix)
     }
 
     private func purgeFromResults(_ ids: Set<UUID>) {
