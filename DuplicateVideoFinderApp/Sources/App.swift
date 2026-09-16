@@ -16,6 +16,8 @@ final class ScanModel: ObservableObject {
     @Published var progressTotal = 0
     @Published var didScan = false
     @Published var filesChecked = 0
+    /// Files the scan couldn't read, so never actually checked.
+    @Published var excludedFiles: [String] = []
     /// Re-read everything rather than trusting what we already know.
     @Published var ignoreCache = false
 
@@ -163,7 +165,19 @@ final class ScanModel: ObservableObject {
         let how = elapsed < 1 && !ignoreCache ? " (from cache)" : ""
         let outcome = found.isEmpty ? "no duplicates"
                                     : "\(found.count) duplicate group(s)"
-        statusText = String(format: "Checked %@ in %.1fs%@ — %@.", files, elapsed, how, outcome)
+        var line = String(format: "Checked %@ in %.1fs%@ — %@.", files, elapsed, how, outcome)
+
+        // Anything unreadable was never compared against anything, so the
+        // result is incomplete rather than empty. Saying nothing would let
+        // "no duplicates" be read as "none exist".
+        let skipped = ScanLog.shared.excluded
+        if !skipped.isEmpty {
+            line += "  ⚠︎ \(skipped.count) file(s) could not be read and were skipped."
+            excludedFiles = skipped.map { "\($0.name) — \($0.reason)" }
+        } else {
+            excludedFiles = []
+        }
+        statusText = line
     }
 
     // ── Marking / acting ─────────────────────────────────────────────────────
@@ -518,6 +532,28 @@ struct ContentView: View {
     private var footer: some View {
         HStack {
             Text(summaryText).font(.system(size: 12)).foregroundStyle(.secondary)
+
+            // Only appears when something was skipped, and then it's worth
+            // noticing: those files were never compared against anything.
+            if !model.excludedFiles.isEmpty {
+                Button {
+                    model.alert = ScanModel.AlertBox(
+                        title: "\(model.excludedFiles.count) file(s) were skipped",
+                        message: "These could not be read, so they were never checked "
+                            + "for duplicates. A result of \"no duplicates\" doesn't "
+                            + "account for them.\n\n"
+                            + model.excludedFiles.prefix(15).joined(separator: "\n")
+                            + (model.excludedFiles.count > 15
+                               ? "\n…and \(model.excludedFiles.count - 15) more (see the log)" : ""))
+                } label: {
+                    Label("\(model.excludedFiles.count) skipped",
+                          systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.link)
+                .help("Files the scan could not read")
+            }
+
             Spacer()
             Button(role: .destructive) {
                 model.trashMarked()

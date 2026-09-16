@@ -611,6 +611,12 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
                 } else {
                     c.failed = true
                     let vf = c.files[0]
+                    // A cluster we can't sample takes no further part in frame
+                    // matching, so any re-encoded copy of it goes unnoticed.
+                    // That's an incomplete answer, not an empty one — say so.
+                    ScanLog.shared.excluded(vf.name, reason: "could not read a frame from it")
+                    ScanLog.shared.note("  WARNING: \(vf.name) could not be sampled — "
+                                        + "excluded from re-encode matching")
                     // remember the failure, so a broken file isn't retried every scan
                     cache?.storeSignature(path: vf.url.path, size: vf.size,
                                           mtime: vf.mtime, signature: nil)
@@ -745,6 +751,7 @@ func scan(folders: [URL], cancel: CancelToken, cache: ScanCache? = ScanCache.loa
     if !unreadable.isEmpty {
         log.note("  WARNING: \(unreadable.count) file(s) could not be read and were "
                  + "excluded from duplicate detection:")
+        for f in unreadable { log.excluded(f.name, reason: "could not read its details") }
         for f in unreadable.prefix(20) { log.note("    \(f.name)") }
         if unreadable.count > 20 { log.note("    …and \(unreadable.count - 20) more") }
     }

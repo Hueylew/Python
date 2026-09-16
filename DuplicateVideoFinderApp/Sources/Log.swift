@@ -74,6 +74,20 @@ final class ScanLog: @unchecked Sendable {
         note("FAIL  \(operation) — \(detail)")
     }
 
+    /// Files the scan could not read, and so never actually checked. This has
+    /// to travel back to the window: "no duplicates found" means something very
+    /// different if part of the folder was skipped.
+    private var excludedFiles: [(name: String, reason: String)] = []
+
+    func excluded(_ name: String, reason: String) {
+        lock.lock(); excludedFiles.append((name, reason)); lock.unlock()
+    }
+
+    var excluded: [(name: String, reason: String)] {
+        lock.lock(); defer { lock.unlock() }
+        return excludedFiles
+    }
+
     /// Counts since the last `resetCounts()`, for the end-of-scan summary.
     var tallies: (slow: Int, timeouts: Int, failures: Int) {
         lock.lock(); defer { lock.unlock() }
@@ -81,7 +95,10 @@ final class ScanLog: @unchecked Sendable {
     }
 
     func resetCounts() {
-        lock.lock(); slowCount = 0; timeoutCount = 0; failureCount = 0; lock.unlock()
+        lock.lock()
+        slowCount = 0; timeoutCount = 0; failureCount = 0
+        excludedFiles.removeAll()
+        lock.unlock()
     }
 
     func flush() {
