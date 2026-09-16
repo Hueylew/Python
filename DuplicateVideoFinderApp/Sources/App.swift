@@ -15,6 +15,9 @@ final class ScanModel: ObservableObject {
     @Published var progressDone = 0
     @Published var progressTotal = 0
     @Published var didScan = false
+    @Published var filesChecked = 0
+    /// Re-read everything rather than trusting what we already know.
+    @Published var ignoreCache = false
 
     @Published var alert: AlertBox?
 
@@ -100,16 +103,25 @@ final class ScanModel: ObservableObject {
         let token = CancelToken()
         cancelToken = token
         let targets = folders
+        filesChecked = 0
+        let started = Date()
+        // "re-read everything" means throwing away what we already know
+        let cache: ScanCache? = ignoreCache ? nil : ScanCache.load()
 
-        Task.detached(priority: .userInitiated) {
-            let found = scan(folders: targets, cancel: token) { done, total, message in
+        Task.detached(priority: .utility) {
+            let found = scan(folders: targets, cancel: token, cache: cache) { done, total, message in
                 Task { @MainActor in
                     self.progressDone = done
                     self.progressTotal = total
                     self.statusText = message
+                    // step 2 visits every file, so its total is the file count
+                    if message.contains("Step 2/4") { self.filesChecked = max(self.filesChecked, total) }
                 }
             }
-            await MainActor.run { self.finishScan(found, cancelled: token.isCancelled) }
+            await MainActor.run {
+                self.finishScan(found, cancelled: token.isCancelled,
+                                elapsed: -started.timeIntervalSinceNow)
+            }
         }
     }
 
@@ -118,7 +130,7 @@ final class ScanModel: ObservableObject {
         statusText = "Cancelling…"
     }
 
-    private func finishScan(_ found: [DuplicateGroup], cancelled: Bool) {
+    private func finishScan(_ found: [DuplicateGroup], cancelled: Bool, elapsed: TimeInterval) {
         scanning = false
         progressDone = 0
         progressTotal = 0
@@ -130,9 +142,16 @@ final class ScanModel: ObservableObject {
             for f in g.files.dropFirst() { marked.insert(f.id) }
         }
 
-        statusText = cancelled
-            ? "Scan cancelled."
-            : "Scan complete — \(found.count) duplicate group(s) found."
+        guard !cancelled else { statusText = "Scan cancelled."; return }
+
+        // A fully cached folder finishes in milliseconds, which looks exactly
+        // like nothing happening. Say what was checked and how long it took, so
+        // "instant" reads as "already known" rather than "didn't run".
+        let files = filesChecked > 0 ? "\(filesChecked) file(s)" : "no video files"
+        let how = elapsed < 1 && !ignoreCache ? " (from cache)" : ""
+        let outcome = found.isEmpty ? "no duplicates"
+                                    : "\(found.count) duplicate group(s)"
+        statusText = String(format: "Checked %@ in %.1fs%@ — %@.", files, elapsed, how, outcome)
     }
 
     // ── Marking / acting ─────────────────────────────────────────────────────
@@ -209,6 +228,11 @@ final class ScanModel: ObservableObject {
         let removed = trashed.union(deleted)
         purgeFromResults(removed)
         let cleared = removed.isEmpty ? [] : dropFinishedFolders()
+
+        // The batch has been dealt with, so the remembered metadata and frame
+        // hashes describe a folder that no longer looks like that — entries for
+        // the files just removed are dead weight. Start the next one clean.
+        if !removed.isEmpty { ScanCache.load().clear() }
 
         var lines: [String] = []
         if !trashed.isEmpty { lines.append("\(trashed.count) moved to the Trash.") }
@@ -410,6 +434,11 @@ struct ContentView: View {
                     }
                     .keyboardShortcut(.return, modifiers: .command)
                     .disabled(model.folders.isEmpty)
+
+                    Toggle("Re-read everything", isOn: $model.ignoreCache)
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 11))
+                        .help("Ignore what was remembered from the last scan and read every file again")
                 }
 
                 if model.progressTotal > 0 {

@@ -90,6 +90,17 @@ final class ScanCache: @unchecked Sendable {
         dirty = true
     }
 
+    /// Forget everything. Used once a batch of duplicates has actually been
+    /// dealt with: entries for files that no longer exist are dead weight, and
+    /// the next scan of those folders should start from what's really there.
+    func clear() {
+        lock.lock()
+        entries.removeAll()
+        dirty = false
+        lock.unlock()
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
     func save() {
         lock.lock()
         guard dirty else { lock.unlock(); return }
