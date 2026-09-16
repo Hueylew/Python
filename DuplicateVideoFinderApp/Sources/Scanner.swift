@@ -20,11 +20,25 @@ let samplePositions = [0.25, 0.5, 0.75]
 let hashWordsPerFrame = 4                  // 4 x UInt64 = 256 bits
 let maxHammingPerFrame = 24                // out of 256; observed false floor was 43
 
-// A local disk is seek-bound: measured on a USB video library, 1→23.5s,
-// 2→16.5s, 4→14.9s, 8→15.2s — past ~4 concurrent readers it just thrashes.
-// A network share is latency-bound instead (most of the wall clock is round
-// trips, not platter movement), so it wants far more requests in flight.
+// Two readers, not four, for a local disk.
+//
+// Measured on two USB drives, and the second one is emphatic. On a library of
+// 207 files: 4 workers took 249.9s with 44 timeouts, 2 took 38.2s with 2, and
+// 1 took 40.9s with none. The timeouts were never the drive sleeping on its
+// own schedule — concurrent readers were thrashing the heads and manufacturing
+// the stalls. An earlier drive preferred 4 (14.9s against 16.5s at 2), so the
+// cost of choosing 2 there is about a tenth, against a six-fold gain here.
+//
+// A network share is latency-bound rather than seek-bound — most of its wall
+// clock is round trips, not platter movement — so it still wants requests in
+// flight. That figure has not been measured as carefully as this one.
 func workerCount(for folders: [URL]) -> Int {
+    // Escape hatch for tuning against a particular drive — the right number is
+    // a property of the hardware, and a spinning disk that thrashes wants far
+    // fewer readers than the default assumes.
+    if let override = ProcessInfo.processInfo.environment["DVF_WORKERS"],
+       let n = Int(override), n > 0 { return n }
+
     let cores = ProcessInfo.processInfo.activeProcessorCount
     let anyRemote = folders.contains { url in
         ((try? url.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? true) == false
@@ -32,7 +46,7 @@ func workerCount(for folders: [URL]) -> Int {
     // Network work is latency-bound so it wants requests in flight, but each
     // worker still decodes a frame, so going past core count just thrashes the
     // machine. One single-threaded decoder per core is the honest ceiling.
-    return anyRemote ? cores : min(4, cores)
+    return anyRemote ? cores : min(2, cores)
 }
 
 enum Tools {
