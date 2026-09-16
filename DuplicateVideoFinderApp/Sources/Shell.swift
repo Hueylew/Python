@@ -103,8 +103,14 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
 /// means "the disk was asleep", not "this file is unreadable", and the second
 /// attempt lands on a drive that is now awake.
 func runProcessRetrying(_ launchPath: String, _ args: [String],
-                        timeout: TimeInterval) -> RunResult {
-    let first = runProcess(launchPath, args, timeout: timeout)
+                        timeout: TimeInterval,
+                        firstAttempt: TimeInterval = 6) -> RunResult {
+    // Be impatient first, generous second. On a real scan every single timeout
+    // was recovered by the retry in about 100ms — the drive had stalled, and
+    // waiting the full window only delayed finding that out. Reads that do
+    // succeed here take 0.06-2.7s, so six seconds clears honest work while
+    // catching a stall five times sooner.
+    let first = runProcess(launchPath, args, timeout: min(firstAttempt, timeout))
     guard first.timedOut else { return first }
 
     let tool = (launchPath as NSString).lastPathComponent
