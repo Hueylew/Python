@@ -178,6 +178,51 @@ struct VideoFile: Identifiable, Hashable {
     }
 }
 
+/// The name this one looks like a numbered copy of, or nil.
+///
+/// Unlike `looksDerived` this includes a bare trailing space-number, because it
+/// is only ever consulted against the other members of a group. A filename on
+/// its own can't tell "Episode 2" from a counter — but "The Farmer's Daughter
+/// 2" sitting next to "The Farmer's Daughter" as a duplicate can. The sibling
+/// resolves what the name alone cannot.
+func counterBase(of stem: String) -> String? {
+    let markers = [
+        #"\s*\(\d{1,3}\)$"#,                         // "Name (2)"
+        #"(?i)\s*[ _-]cop(y|ies)([ _-]?\d{1,3})?$"#,  // "Name copy", "Name copy 2"
+        #"[ _-]\d{1,3}$"#,                           // "Name 2", "Name-2", "Name_2"
+    ]
+    for pattern in markers {
+        guard let r = stem.range(of: pattern, options: .regularExpression) else { continue }
+        var base = stem
+        base.removeSubrange(r)
+        let trimmed = base.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty { return trimmed }
+    }
+    return nil
+}
+
+/// If the best copy is a numbered version of another file in the same group,
+/// and they're equally good, keep the one without the number.
+func promoteOriginal(_ ranked: [VideoFile]) -> [VideoFile] {
+    guard ranked.count > 1 else { return ranked }
+    let leader = ranked[0]
+    guard let base = counterBase(of: leader.url.deletingPathExtension().lastPathComponent)
+    else { return ranked }
+
+    guard let idx = ranked.firstIndex(where: {
+        $0.url.deletingPathExtension().lastPathComponent
+            .caseInsensitiveCompare(base) == .orderedSame
+    }), idx != 0 else { return ranked }
+
+    // never trade away picture quality for a tidier name
+    guard ranked[idx].pixels == leader.pixels,
+          ranked[idx].bitrateBucket == leader.bitrateBucket else { return ranked }
+
+    var out = ranked
+    out.swapAt(0, idx)
+    return out
+}
+
 func betterQuality(_ a: VideoFile, _ b: VideoFile) -> Bool {
     let x = a.qualityKey, y = b.qualityKey
     if x.0 != y.0 { return x.0 > y.0 }
@@ -204,6 +249,14 @@ struct DuplicateGroup: Identifiable {
         if others.contains(where: { best.pixels > $0.pixels }) { return "highest resolution" }
         if others.contains(where: { best.bitrateBucket > $0.bitrateBucket }) { return "highest bitrate" }
         if others.contains(where: { best.nameScore > $0.nameScore }) { return "clearest filename" }
+        // the group-relative case: another member is this name with a number added
+        let bestStem = best.url.deletingPathExtension().lastPathComponent
+        if others.contains(where: {
+            counterBase(of: $0.url.deletingPathExtension().lastPathComponent)?
+                .caseInsensitiveCompare(bestStem) == .orderedSame
+        }) {
+            return "the original, not the numbered copy"
+        }
         if others.contains(where: { best.originality > $0.originality }) {
             return "the original, not a numbered or dated copy"
         }
@@ -680,6 +733,7 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
         let here = members.map { pool[$0] }
         var files = here.flatMap { $0.files }
         files.sort(by: betterQuality)
+        files = promoteOriginal(files)
         // "exact" only when a single byte-identical cluster is involved
         groups.append(DuplicateGroup(kind: here.count == 1 ? .exact : .possible, files: files))
         for c in here { accounted.insert(ObjectIdentifier(c)) }
@@ -688,7 +742,8 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
     // byte-identical clusters that never took part in a frame match — including
     // everything the duration filter skipped — are still duplicates
     for c in clusters where c.files.count > 1 && !accounted.contains(ObjectIdentifier(c)) {
-        groups.append(DuplicateGroup(kind: .exact, files: c.files.sorted(by: betterQuality)))
+        groups.append(DuplicateGroup(kind: .exact,
+                                    files: promoteOriginal(c.files.sorted(by: betterQuality))))
     }
     return groups
 }
