@@ -23,6 +23,10 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
     let errPipe = Pipe()
     proc.standardOutput = outPipe
     proc.standardError = errPipe
+    // ffmpeg reads stdin for interactive keypresses. Inheriting ours lets it
+    // block there forever, which showed up as a 25s stall (the full timeout,
+    // terminate and kill ladder) on a file that decodes in half a second.
+    proc.standardInput = FileHandle.nullDevice
 
     let ioQueue = DispatchQueue(label: "proc.io")
     var outData = Data()
@@ -43,6 +47,7 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
                          err: "failed to launch \(launchPath): \(error)", timedOut: false)
     }
 
+    let started = Date()
     var timedOut = false
     if let timeout = timeout {
         let sem = DispatchSemaphore(value: 0)
@@ -70,6 +75,19 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
     // Belt and braces: if it somehow outlived the kill, report a failure rather
     // than asking for a status that would raise and terminate the process.
     let status: Int32 = proc.isRunning ? -1 : proc.terminationStatus
+
+    // A stalled read is indistinguishable from a slow one while you're watching
+    // it, so record which file and how long — that's what separates a drive
+    // spinning up from the app doing real work.
+    let tool = (launchPath as NSString).lastPathComponent
+    let target = (args.last(where: { $0.hasPrefix("/") }) as NSString?)?.lastPathComponent
+        ?? args.last ?? ""
+    if timedOut {
+        ScanLog.shared.timedOut(tool, detail: target)
+    } else {
+        ScanLog.shared.timed(tool, seconds: -started.timeIntervalSinceNow, detail: target)
+        if status != 0 { ScanLog.shared.failed("\(tool) exit \(status)", detail: target) }
+    }
 
     return ioQueue.sync {
         RunResult(status: status, out: outData,

@@ -537,6 +537,8 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
             pairs.append((i, j, 0))
         }
     }
+    ScanLog.shared.note("  step 4: \(clusters.count) cluster(s), \(pool.count) worth sampling, "
+                        + "\(pairs.count) candidate pair(s)")
 
     for stage in 0..<samplePositions.count {
         if pairs.isEmpty || cancel.isCancelled { break }
@@ -573,6 +575,7 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
             }
         }
 
+        let before = pairs.count
         pairs = pairs.compactMap { p in
             let a = pool[p.i], b = pool[p.j]
             guard !a.failed, !b.failed,
@@ -580,6 +583,9 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
             let d = p.dist + hamming(a.frames[stage], b.frames[stage])
             return d > budget ? nil : (p.i, p.j, d)
         }
+        // how well one-frame-first is actually working on this folder
+        ScanLog.shared.note("  pass \(stage + 1): sampled \(needed.count) file(s), "
+                            + "pairs \(before) → \(pairs.count)")
     }
 
     // Group only where every member matches every other member.
@@ -642,9 +648,27 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
 func scan(folders: [URL], cancel: CancelToken, cache: ScanCache? = ScanCache.load(),
           progress: @escaping (Int, Int, String) -> Void) -> [DuplicateGroup] {
     let workers = workerCount(for: folders)
+    let scanStarted = Date()
+    let log = ScanLog.shared
+    log.resetCounts()
+    log.note("──────── scan starting ────────")
+    for f in folders {
+        let local = (try? f.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? true
+        log.note("  folder: \(f.path)  [\(local ? "local" : "network")]")
+    }
+    log.note("  workers: \(workers)   cores: \(ProcessInfo.processInfo.activeProcessorCount)"
+             + "   cache: \(cache == nil ? "off" : "on")")
+
+    var phase = Date()
+    func mark(_ name: String, _ extra: String = "") {
+        log.note(String(format: "  %@ took %.1fs %@", name, -phase.timeIntervalSinceNow, extra))
+        phase = Date()
+    }
+
     progress(0, 0, "Step 1/4 — Finding video files…")
     let paths = findVideoFiles(in: folders)
-    if cancel.isCancelled { return [] }
+    mark("step 1 find files", "— \(paths.count) files")
+    if cancel.isCancelled { log.note("  cancelled"); log.flush(); return [] }
 
     var files: [VideoFile] = []
     if !paths.isEmpty {
@@ -655,22 +679,36 @@ func scan(folders: [URL], cancel: CancelToken, cache: ScanCache? = ScanCache.loa
                                   transform: { buildVideoFile($0, cache: cache) })
         files = built.compactMap { $0 ?? nil }
     }
-    if cancel.isCancelled { cache?.save(); return [] }
+    mark("step 2 metadata", "— \(files.count) readable")
+    if cancel.isCancelled { cache?.save(); log.note("  cancelled"); log.flush(); return [] }
     files.sort { $0.url.path < $1.url.path }  // threads finish out of order
 
     let clusters = groupByExactHash(files, workers: workers, cancel: cancel) { d, t, m in
         progress(d, t, "Step 3/4 — Checking exact duplicates: \(m)")
     }
-    if cancel.isCancelled { cache?.save(); return [] }
+    mark("step 3 exact duplicates")
+    if cancel.isCancelled { cache?.save(); log.note("  cancelled"); log.flush(); return [] }
 
     var groups = matchClusters(clusters, workers: workers, cache: cache, cancel: cancel) { d, t, m in
         progress(d, t, "Step 4/4 — Checking for re-encoded duplicates: \(m)")
     }
+    mark("step 4 re-encoded duplicates")
     // keep whatever we learned, even if the user cancels part-way
     cache?.save()
-    if cancel.isCancelled { return [] }
+    if cancel.isCancelled { log.note("  cancelled"); log.flush(); return [] }
 
     groups.sort { $0.wastedBytes > $1.wastedBytes }  // biggest wins first
+
+    let t = log.tallies
+    log.note(String(format: "  TOTAL %.1fs — %d group(s); %d slow op(s), %d timeout(s), %d failure(s)",
+                    -scanStarted.timeIntervalSinceNow, groups.count,
+                    t.slow, t.timeouts, t.failures))
+    if t.timeouts > 0 {
+        log.note("  NOTE: timeouts usually mean the drive stalled or spun down, "
+                 + "not that the file is bad")
+    }
+    log.note("")
+    log.flush()
     return groups
 }
 
