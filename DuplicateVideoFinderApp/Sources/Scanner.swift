@@ -449,7 +449,8 @@ struct UnionFind {
     }
 }
 
-func groupByExactHash(_ files: [VideoFile], workers: Int, cancel: CancelToken,
+func groupByExactHash(_ files: [VideoFile], workers: Int, cache: ScanCache?,
+                      cancel: CancelToken,
                       progress: @escaping (Int, Int, String) -> Void) -> [ByteCluster] {
     var bySize: [Int64: [VideoFile]] = [:]
     for f in files { bySize[f.size, default: []].append(f) }
@@ -474,13 +475,41 @@ func groupByExactHash(_ files: [VideoFile], workers: Int, cancel: CancelToken,
 
         // Second pass: confirm the survivors properly. Matching ends are not
         // proof, and these get deleted, so nothing is called exact on a sample.
-        let needHash = byEdge.values.filter { $0.count > 1 }.flatMap { $0 }
+        var needHash = byEdge.values.filter { $0.count > 1 }.flatMap { $0 }
+
+        // Anything already hashed and unchanged since costs nothing. This is
+        // the single most valuable thing the cache holds: on a 698GB folder
+        // this stage was 28 minutes of a 35 minute scan.
+        if let cache {
+            var reused = 0
+            needHash = needHash.filter { f in
+                guard let e = cache.entry(for: f.url.path, size: f.size, mtime: f.mtime),
+                      let h = e.contentHash else { return true }
+                digests[f.id] = h
+                reused += 1
+                return false
+            }
+            if reused > 0 {
+                ScanLog.shared.note("  reused \(reused) cached content hash(es), "
+                                    + "\(needHash.count) still to read in full")
+            }
+        }
+
         if !needHash.isEmpty {
+            let totalBytes = needHash.reduce(Int64(0)) { $0 + $1.size }
+            ScanLog.shared.note("  hashing \(needHash.count) file(s) in full — "
+                                + "\(humanSize(totalBytes)) to read")
             let hashed = concurrentMap(needHash, limit: workers, cancel: cancel,
                                        onProgress: { d, t, f in progress(d, t, "Hashing \(f.name)") },
                                        transform: { hashFileContents($0.url) })
             for (i, h) in hashed.enumerated() {
-                if let h = h ?? nil { digests[needHash[i].id] = h }
+                guard let h = h ?? nil else { continue }
+                let f = needHash[i]
+                digests[f.id] = h
+                // expensive to produce, cheap to keep — never read this file
+                // end to end again unless it actually changes
+                cache?.storeContentHash(path: f.url.path, size: f.size,
+                                        mtime: f.mtime, hash: h)
             }
         }
     }
@@ -722,7 +751,7 @@ func scan(folders: [URL], cancel: CancelToken, cache: ScanCache? = ScanCache.loa
     if cancel.isCancelled { cache?.save(); log.note("  cancelled"); log.flush(); return [] }
     files.sort { $0.url.path < $1.url.path }  // threads finish out of order
 
-    let clusters = groupByExactHash(files, workers: workers, cancel: cancel) { d, t, m in
+    let clusters = groupByExactHash(files, workers: workers, cache: cache, cancel: cancel) { d, t, m in
         progress(d, t, "Step 3/4 — Checking exact duplicates: \(m)")
     }
     mark("step 3 exact duplicates")

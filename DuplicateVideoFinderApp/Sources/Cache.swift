@@ -17,6 +17,11 @@ struct CacheEntry: Codable {
     var signature: [UInt64]?
     var sampled: Bool = false       // frame sampling ran, even if it failed
 
+    /// SHA-256 of the whole file. Much the most expensive thing we ever
+    /// compute — confirming byte-identity means reading every byte, and on a
+    /// folder of 698GB that took 28 minutes of a 35 minute scan.
+    var contentHash: String?
+
     var lastSeen: Double = Date().timeIntervalSince1970
 
     func matches(size: Int64, mtime: Double) -> Bool {
@@ -74,6 +79,17 @@ final class ScanCache: @unchecked Sendable {
         e.size = size; e.mtime = mtime
         e.duration = duration; e.width = width; e.height = height; e.codec = codec
         e.probed = true
+        e.lastSeen = Date().timeIntervalSince1970
+        entries[path] = e
+        dirty = true
+    }
+
+    func storeContentHash(path: String, size: Int64, mtime: Double, hash: String) {
+        lock.lock(); defer { lock.unlock() }
+        var e = entries[path].flatMap { $0.matches(size: size, mtime: mtime) ? $0 : nil }
+            ?? CacheEntry(size: size, mtime: mtime)
+        e.size = size; e.mtime = mtime
+        e.contentHash = hash
         e.lastSeen = Date().timeIntervalSince1970
         entries[path] = e
         dirty = true
