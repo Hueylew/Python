@@ -16,6 +16,8 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
     let proc = Process()
     proc.executableURL = URL(fileURLWithPath: launchPath)
     proc.arguments = args
+    // scanning is background work — it shouldn't out-compete the foreground app
+    proc.qualityOfService = .utility
 
     let outPipe = Pipe()
     let errPipe = Pipe()

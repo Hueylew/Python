@@ -29,7 +29,10 @@ func workerCount(for folders: [URL]) -> Int {
     let anyRemote = folders.contains { url in
         ((try? url.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? true) == false
     }
-    return anyRemote ? max(12, cores) : min(4, cores)
+    // Network work is latency-bound so it wants requests in flight, but each
+    // worker still decodes a frame, so going past core count just thrashes the
+    // machine. One single-threaded decoder per core is the honest ceiling.
+    return anyRemote ? cores : min(4, cores)
 }
 
 enum Tools {
@@ -104,15 +107,6 @@ struct VideoFile: Identifiable, Hashable {
         return score
     }
 
-    /// Rank by how much picture information a copy retains. Resolution
-    /// dominates; then bits per second, since that's real compression damage.
-    /// Only once those tie does the filename decide — a name is trivially
-    /// fixable, lost picture detail is not.
-    /// Names that look like a copy taken from another file rather than the
-    /// original: a trailing counter the way Finder and browsers add one, or a
-    /// date stamped on the front. Only consulted once quality and readability
-    /// are already equal, so at worst it picks a different copy of the same
-    /// thing to keep.
     /// Markers a tool adds when it can't reuse a name. Verified against what
     /// this Mac actually does: Finder's Duplicate gives "clip copy" then
     /// "clip copy 2", Safari appends "-1", browsers use "(1)".
@@ -160,6 +154,11 @@ struct VideoFile: Identifiable, Hashable {
     /// 1 for a name that looks like the original, 0 for one that looks derived.
     var originality: Int { looksDerived ? 0 : 1 }
 
+    /// Rank by how much picture information a copy retains. Resolution
+    /// dominates; then bits per second, since that's real compression damage.
+    /// Only once those tie does the name decide — readability first, then
+    /// whether it looks like the original rather than a copy of one. A name is
+    /// trivially fixable; lost picture detail is not.
     var qualityKey: (Int, Int, Int, Int, Int64) {
         (pixels, bitrateBucket, nameScore, originality, size)
     }
@@ -227,7 +226,9 @@ func concurrentMap<T, R>(_ items: [T], limit: Int, cancel: CancelToken,
         if cancel.isCancelled { break }
         sem.wait()
         group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
+        // .utility, not .userInitiated: a background scan should lose to
+        // whatever the person is actually doing, rather than competing with it
+        DispatchQueue.global(qos: .utility).async {
             defer { sem.signal(); group.leave() }
             if cancel.isCancelled { return }
             let r = transform(item)
@@ -298,9 +299,9 @@ func buildVideoFile(_ url: URL, cache: ScanCache? = nil) -> VideoFile? {
     guard let ffprobe = Tools.ffprobe else { return vf }
 
     let r = runProcess(ffprobe, [
-        "-v", "quiet", "-print_format", "json",
+        "-v", "quiet", "-threads", "1", "-print_format", "json",
         "-show_format", "-show_streams", "-select_streams", "v:0", url.path,
-    ], timeout: 30)
+    ], timeout: 15)
 
     if r.status == 0,
        let json = try? JSONSerialization.jsonObject(with: r.out) as? [String: Any] {
@@ -363,11 +364,15 @@ func hashFileContents(_ url: URL) -> String? {
 func frameHash(_ url: URL, at seconds: Double) -> [UInt64]? {
     guard let ffmpeg = Tools.ffmpeg else { return nil }
     let (w, h) = (17, 16)                      // one extra column to compare against
+    // -threads 1: we want one frame, and letting ffmpeg spin up its usual
+    // decode threads costs ~2.7x the CPU for no gain. Measured on 4K HEVC:
+    // 0.33s real / 0.76s CPU by default, against 0.27s / 0.28s with one thread.
+    // Multiplied by every worker, that difference is what made the machine drag.
     let r = runProcess(ffmpeg, [
-        "-v", "quiet", "-ss", String(seconds), "-i", url.path,
+        "-v", "quiet", "-threads", "1", "-ss", String(seconds), "-i", url.path,
         "-frames:v", "1", "-vf", "scale=\(w):\(h)", "-pix_fmt", "gray",
         "-f", "rawvideo", "-",
-    ], timeout: 30)
+    ], timeout: 15)
     guard r.status == 0, r.out.count >= w * h else { return nil }
 
     let px = [UInt8](r.out.prefix(w * h))
@@ -517,9 +522,16 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
     let pool = clustersWorthSampling(clusters)   // already sorted by duration
     let budget = maxHammingPerFrame * samplePositions.count
 
-    // every pair close enough in duration to be worth a look
+    // Every pair close enough in duration to be worth a look. This is quadratic
+    // in how many clips share a length, so on a big folder it is both slow and
+    // memory-hungry — and it used to run silently, which is what made the app
+    // look frozen. Report as it goes.
     var pairs: [(i: Int, j: Int, dist: Int)] = []
     for i in 0..<pool.count {
+        if cancel.isCancelled { return [] }
+        if i % 200 == 0 {
+            progress(i, pool.count, "Pairing up candidates (\(pairs.count) so far)")
+        }
         for j in (i + 1)..<pool.count {
             if (pool[j].duration ?? 0) - (pool[i].duration ?? 0) > durationToleranceSec { break }
             pairs.append((i, j, 0))
@@ -594,7 +606,8 @@ func matchClusters(_ clusters: [ByteCluster], workers: Int, cache: ScanCache?,
         return a == b ? $0 < $1 : a > b
     }
 
-    for anchor in anchors where !taken.contains(anchor) {
+    for (seen, anchor) in anchors.enumerated() where !taken.contains(anchor) {
+        if seen % 200 == 0 { progress(seen, anchors.count, "Forming groups") }
         var members = [anchor]
         // closest duration first, so the tightest matches win a contested file
         let candidates = (neighbours[anchor] ?? []).subtracting(taken).sorted {
