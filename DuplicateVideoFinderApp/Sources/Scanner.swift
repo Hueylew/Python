@@ -298,10 +298,10 @@ func buildVideoFile(_ url: URL, cache: ScanCache? = nil) -> VideoFile? {
     // ffmpeg gets installed later.
     guard let ffprobe = Tools.ffprobe else { return vf }
 
-    let r = runProcess(ffprobe, [
+    let r = runProcessRetrying(ffprobe, [
         "-v", "quiet", "-threads", "1", "-print_format", "json",
         "-show_format", "-show_streams", "-select_streams", "v:0", url.path,
-    ], timeout: 15)
+    ], timeout: 30)
 
     if r.status == 0,
        let json = try? JSONSerialization.jsonObject(with: r.out) as? [String: Any] {
@@ -368,11 +368,11 @@ func frameHash(_ url: URL, at seconds: Double) -> [UInt64]? {
     // decode threads costs ~2.7x the CPU for no gain. Measured on 4K HEVC:
     // 0.33s real / 0.76s CPU by default, against 0.27s / 0.28s with one thread.
     // Multiplied by every worker, that difference is what made the machine drag.
-    let r = runProcess(ffmpeg, [
+    let r = runProcessRetrying(ffmpeg, [
         "-v", "quiet", "-threads", "1", "-ss", String(seconds), "-i", url.path,
         "-frames:v", "1", "-vf", "scale=\(w):\(h)", "-pix_fmt", "gray",
         "-f", "rawvideo", "-",
-    ], timeout: 15)
+    ], timeout: 30)
     guard r.status == 0, r.out.count >= w * h else { return nil }
 
     let px = [UInt8](r.out.prefix(w * h))
@@ -679,7 +679,17 @@ func scan(folders: [URL], cancel: CancelToken, cache: ScanCache? = ScanCache.loa
                                   transform: { buildVideoFile($0, cache: cache) })
         files = built.compactMap { $0 ?? nil }
     }
-    mark("step 2 metadata", "— \(files.count) readable")
+    // A file with no duration can't be compared against anything, so it drops
+    // out of detection entirely. That has to be visible: "no duplicates found"
+    // means something quite different if a chunk of the folder was never read.
+    let unreadable = files.filter { ($0.duration ?? 0) <= 0 }
+    mark("step 2 metadata", "— \(files.count) files, \(unreadable.count) with no duration")
+    if !unreadable.isEmpty {
+        log.note("  WARNING: \(unreadable.count) file(s) could not be read and were "
+                 + "excluded from duplicate detection:")
+        for f in unreadable.prefix(20) { log.note("    \(f.name)") }
+        if unreadable.count > 20 { log.note("    …and \(unreadable.count - 20) more") }
+    }
     if cancel.isCancelled { cache?.save(); log.note("  cancelled"); log.flush(); return [] }
     files.sort { $0.url.path < $1.url.path }  // threads finish out of order
 

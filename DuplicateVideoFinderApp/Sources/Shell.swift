@@ -95,6 +95,31 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
     }
 }
 
+/// Run a tool, and if it times out, try once more.
+///
+/// An external drive that has spun down stalls the first read for many seconds
+/// while it wakes. Measured on a sleeping USB disk: reads that hit a 15s
+/// timeout completed in 41-127ms immediately afterwards. So a timeout usually
+/// means "the disk was asleep", not "this file is unreadable", and the second
+/// attempt lands on a drive that is now awake.
+func runProcessRetrying(_ launchPath: String, _ args: [String],
+                        timeout: TimeInterval) -> RunResult {
+    let first = runProcess(launchPath, args, timeout: timeout)
+    guard first.timedOut else { return first }
+
+    let tool = (launchPath as NSString).lastPathComponent
+    let target = (args.last(where: { $0.hasPrefix("/") }) as NSString?)?.lastPathComponent ?? ""
+    ScanLog.shared.note("  retrying \(tool) after timeout — \(target)")
+
+    let second = runProcess(launchPath, args, timeout: timeout)
+    if second.timedOut {
+        ScanLog.shared.failed("\(tool) timed out twice", detail: target)
+    } else {
+        ScanLog.shared.note("  retry succeeded — \(target)")
+    }
+    return second
+}
+
 /// Locate ffmpeg/ffprobe. The copies bundled inside the .app win, so the app
 /// keeps working on a Mac with no Homebrew; a system install is the fallback.
 func findTool(_ name: String) -> String? {
