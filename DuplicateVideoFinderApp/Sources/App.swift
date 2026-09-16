@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // ── View model ───────────────────────────────────────────────────────────────
 @MainActor
@@ -45,6 +46,32 @@ final class ScanModel: ObservableObject {
 
     func removeFolders(_ selection: Set<URL>) {
         folders.removeAll { selection.contains($0) }
+    }
+
+    /// Accept folders dropped onto the window. Dropping a file adds the folder
+    /// it sits in, since that's almost always what someone means by dragging a
+    /// video across — and it beats the drop silently doing nothing.
+    func addDropped(_ providers: [NSItemProvider]) -> Bool {
+        // loadObject(ofClass: URL.self), not loadItem(forTypeIdentifier:) — the
+        // latter's completion never fires for a dropped file URL, so the drop
+        // silently does nothing.
+        let usable = providers.filter { $0.canLoadObject(ofClass: URL.self) }
+        guard !usable.isEmpty else { return false }
+
+        for provider in usable {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+                else { return }
+                let folder = isDirectory.boolValue ? url : url.deletingLastPathComponent()
+                Task { @MainActor in
+                    guard !self.folders.contains(folder) else { return }
+                    self.folders.append(folder)
+                }
+            }
+        }
+        return true
     }
 
     // ── Scanning ─────────────────────────────────────────────────────────────
@@ -270,6 +297,7 @@ struct FileRow: View {
 struct ContentView: View {
     @StateObject private var model = ScanModel()
     @State private var folderSelection = Set<URL>()
+    @State private var isDropTarget = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -281,6 +309,10 @@ struct ContentView: View {
         }
         .padding(16)
         .frame(minWidth: 940, minHeight: 620)
+        // anywhere on the window is a drop target, so there's nothing to aim at
+        .onDrop(of: [.fileURL], isTargeted: $isDropTarget) { providers in
+            model.addDropped(providers)
+        }
         .alert(item: $model.alert) { box in
             Alert(title: Text(box.title), message: Text(box.message),
                   dismissButton: .default(Text("OK")))
@@ -306,9 +338,16 @@ struct ContentView: View {
                 .frame(height: 78)
                 .overlay {
                     if model.folders.isEmpty {
-                        Text("No folders added yet")
-                            .foregroundStyle(.tertiary).font(.system(size: 12))
+                        Text(isDropTarget ? "Drop to add"
+                                          : "No folders yet — drag folders here, or use Add Folder…")
+                            .foregroundStyle(isDropTarget ? Color.accentColor : Color.secondary)
+                            .font(.system(size: 12))
                     }
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Color.accentColor, lineWidth: 2)
+                        .opacity(isDropTarget ? 1 : 0)
                 }
 
                 VStack(spacing: 6) {
