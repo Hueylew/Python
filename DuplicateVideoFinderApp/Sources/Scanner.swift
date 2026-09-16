@@ -81,7 +81,9 @@ struct VideoFile: Identifiable, Hashable {
     /// hash scores 0; a name built from real words scores higher. Only ever used
     /// to break ties between copies of equal picture quality.
     var nameScore: Int {
-        let stem = url.deletingPathExtension().lastPathComponent
+        // scored on the canonical name, so a copy doesn't out-rank the original
+        // it was made from just by carrying the extra word "copy"
+        let stem = canonicalStem
         if UUID(uuidString: stem) != nil { return 0 }
 
         var score = 0
@@ -106,7 +108,61 @@ struct VideoFile: Identifiable, Hashable {
     /// dominates; then bits per second, since that's real compression damage.
     /// Only once those tie does the filename decide — a name is trivially
     /// fixable, lost picture detail is not.
-    var qualityKey: (Int, Int, Int, Int64) { (pixels, bitrateBucket, nameScore, size) }
+    /// Names that look like a copy taken from another file rather than the
+    /// original: a trailing counter the way Finder and browsers add one, or a
+    /// date stamped on the front. Only consulted once quality and readability
+    /// are already equal, so at worst it picks a different copy of the same
+    /// thing to keep.
+    /// Markers a tool adds when it can't reuse a name. Verified against what
+    /// this Mac actually does: Finder's Duplicate gives "clip copy" then
+    /// "clip copy 2", Safari appends "-1", browsers use "(1)".
+    ///
+    /// A bare trailing space-number ("Episode 2", "Part 1 of 3") is deliberately
+    /// not treated as a counter — too many real titles end that way.
+    private static let copyMarkers = [
+        #"\s*\(\d{1,3}\)$"#,                        // "clip (2)"
+        #"(?i)\s*[ _-]cop(y|ies)([ _-]?\d{1,3})?$"#, // "clip copy", "clip copy 3"
+        #"[-_]\d{1,3}$"#,                           // "clip-1" (Safari), "clip_2"
+    ]
+    private static let datePrefix = #"^\d{4}[-_.]?\d{2}[-_.]?\d{2}([-_. ]+|$)"#
+
+    var looksDerived: Bool {
+        let stem = url.deletingPathExtension().lastPathComponent
+            .trimmingCharacters(in: .whitespaces)
+        for pattern in Self.copyMarkers
+        where stem.range(of: pattern, options: .regularExpression) != nil { return true }
+        return stem.range(of: Self.datePrefix, options: .regularExpression) != nil
+    }
+
+    /// The name with any copy marker or date prefix taken off, so "clip copy"
+    /// reads as well as "clip" rather than scoring higher for containing the
+    /// extra word "copy" — which would otherwise rank the copy above the
+    /// original it was made from.
+    var canonicalStem: String {
+        var stem = url.deletingPathExtension().lastPathComponent
+            .trimmingCharacters(in: .whitespaces)
+        if let r = stem.range(of: Self.datePrefix, options: .regularExpression) {
+            stem.removeSubrange(r)
+        }
+        var changed = true
+        while changed {
+            changed = false
+            for pattern in Self.copyMarkers {
+                if let r = stem.range(of: pattern, options: .regularExpression) {
+                    stem.removeSubrange(r)
+                    changed = true
+                }
+            }
+        }
+        return stem.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 1 for a name that looks like the original, 0 for one that looks derived.
+    var originality: Int { looksDerived ? 0 : 1 }
+
+    var qualityKey: (Int, Int, Int, Int, Int64) {
+        (pixels, bitrateBucket, nameScore, originality, size)
+    }
 }
 
 func betterQuality(_ a: VideoFile, _ b: VideoFile) -> Bool {
@@ -114,7 +170,8 @@ func betterQuality(_ a: VideoFile, _ b: VideoFile) -> Bool {
     if x.0 != y.0 { return x.0 > y.0 }
     if x.1 != y.1 { return x.1 > y.1 }
     if x.2 != y.2 { return x.2 > y.2 }
-    return x.3 > y.3
+    if x.3 != y.3 { return x.3 > y.3 }
+    return x.4 > y.4
 }
 
 struct DuplicateGroup: Identifiable {
@@ -134,6 +191,9 @@ struct DuplicateGroup: Identifiable {
         if others.contains(where: { best.pixels > $0.pixels }) { return "highest resolution" }
         if others.contains(where: { best.bitrateBucket > $0.bitrateBucket }) { return "highest bitrate" }
         if others.contains(where: { best.nameScore > $0.nameScore }) { return "clearest filename" }
+        if others.contains(where: { best.originality > $0.originality }) {
+            return "the original, not a numbered or dated copy"
+        }
         return "largest file"
     }
 
