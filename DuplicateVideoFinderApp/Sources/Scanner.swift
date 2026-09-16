@@ -651,7 +651,22 @@ func scan(folders: [URL], cancel: CancelToken, cache: ScanCache? = ScanCache.loa
     let scanStarted = Date()
     let log = ScanLog.shared
     log.resetCounts()
+    log.beginScan()
     log.note("──────── scan starting ────────")
+
+    // Advisory only here — the app refuses outright, but a scan driven from a
+    // tool should still record that it was competing for the same disks, since
+    // that inflates every timing in this file.
+    let gotLock = ScanLock.acquire(folders: folders)
+    if !gotLock, let other = ScanLock.holder() {
+        log.note(String(format: "  WARNING: another scan (pid %d) has been running %.0fs "
+                        + "on %@ — every timing below is inflated by the contention",
+                        other.pid, other.age, other.folders))
+    }
+    defer {
+        if gotLock { ScanLock.release() }
+        log.flush()
+    }
     for f in folders {
         let local = (try? f.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal ?? true
         log.note("  folder: \(f.path)  [\(local ? "local" : "network")]")

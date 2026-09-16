@@ -90,6 +90,18 @@ final class ScanModel: ObservableObject {
                              message: "Could not find: \(Tools.missing.joined(separator: ", ")).")
             return
         }
+        // Two scans over one drive is far worse than twice as slow: a real
+        // overlap turned a ~170s job into 443s and 571s, purely from the extra
+        // readers fighting over the same mechanism.
+        if let other = ScanLock.holder(), !other.isThisProcess {
+            alert = AlertBox(
+                title: "A scan is already running",
+                message: "Another scan (process \(other.pid)) started "
+                    + "\(Int(other.age))s ago on \(other.folders).\n\n"
+                    + "Running two over the same drive makes both dramatically slower, "
+                    + "so wait for that one to finish first.")
+            return
+        }
 
         scanning = true
         didScan = false

@@ -36,8 +36,20 @@ final class ScanLog: @unchecked Sendable {
     }()
 
     // ── writing ──────────────────────────────────────────────────────────────
+    /// Identifies which scan wrote a line. Two scans appending to one file
+    /// interleave, and their timestamps then look out of order — without this
+    /// the log is genuinely hard to read when anything overlaps.
+    private var tag = "----"
+
+    func beginScan() {
+        lock.lock()
+        tag = String(format: "%04x", UInt16.random(in: 0...UInt16.max))
+        lock.unlock()
+    }
+
     func note(_ message: String) {
-        let line = "\(Self.stamp.string(from: Date()))  \(message)"
+        lock.lock(); let id = tag; lock.unlock()
+        let line = "\(Self.stamp.string(from: Date()))  [\(id)] \(message)"
         lock.lock()
         buffer.append(line)
         let full = buffer.count >= 200
@@ -84,13 +96,14 @@ final class ScanLog: @unchecked Sendable {
                                 withIntermediateDirectories: true)
         rotateIfTooBig()
 
-        if let handle = try? FileHandle(forWritingTo: fileURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: Data(text.utf8))
-        } else {
-            try? Data(text.utf8).write(to: fileURL)
-        }
+        // O_APPEND, so concurrent scans can't overwrite each other. Seeking to
+        // the end and then writing is two steps, and a second process writing
+        // between them silently loses the first one's lines — which is exactly
+        // what happened the one time two scans overlapped.
+        let fd = open(fileURL.path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+        _ = text.withCString { write(fd, $0, strlen($0)) }
     }
 
     /// Keep the current log and one previous, so it can't grow without limit.
