@@ -124,6 +124,82 @@ func dvdTitles(in videoTS: URL) -> [DVDTitle] {
     .sorted { $0.bytes > $1.bytes }
 }
 
+// ── Naming the output ────────────────────────────────────────────────────────
+
+/// Trailing scaffolding that marks a file as one piece of a set, so it can come
+/// off the title the pieces share.
+private let partMarkers = ["part", "pt", "cd", "disc", "disk", "vol", "reel", "chapter"]
+
+private func trimmingJunk(_ text: String) -> String {
+    var out = text
+    while let last = out.last,
+          last.isWhitespace || "._-–—([{#".contains(last) {
+        out.removeLast()
+    }
+    return out
+}
+
+/// A filename to suggest when saving a merge, taken from the clips themselves.
+///
+/// Clips that belong together are named alike — "Film part1.mp4", "Film
+/// part2.mp4", "Film.cd1.mkv" — so the prefix they share is the title, once the
+/// part marker it stops at is trimmed away. Anything left is a better starting
+/// point than a generic name the title has to be typed over.
+func suggestedMergeName(for items: [MediaItem], allowed: [String]) -> String {
+    guard let first = items.first else { return "merged." + allowed[0] }
+
+    // Merging MOVs should offer a .mov: the container the clips already share is
+    // the one most likely to take them by stream copy.
+    let ext = allowed.contains(first.ext) ? first.ext : allowed[0]
+    let stems = items.map { $0.url.deletingPathExtension().lastPathComponent }
+
+    var name = trimmingJunk(commonPrefix(of: stems))
+
+    // "Rocky 2 part" is a title ending in a number, not a counter, so only treat
+    // a trailing run of digits as a counter when there is no marker to remove.
+    if let marker = name.range(of: "(?i)(" + partMarkers.joined(separator: "|") + ")$",
+                               options: .regularExpression) {
+        name.removeSubrange(marker)
+    } else if let digits = name.range(of: "[0-9]+$", options: .regularExpression) {
+        name.removeSubrange(digits)
+        // Episode numbering leaves its own marker behind: "show.s01e01" and
+        // "show.s01e02" share "show.s01e0", and dropping the counter strands
+        // the "e". A single letter sitting directly after a digit is part of
+        // that scaffolding, not the title.
+        if let stranded = name.range(of: "(?<=[0-9])[a-zA-Z]$", options: .regularExpression) {
+            name.removeSubrange(stranded)
+        }
+    }
+    name = trimmingJunk(name)
+
+    // Names with nothing useful in common: the first clip's own name still beats
+    // something generic, since it is at least the thing being merged.
+    if name.count < 2 { name = stems[0] }
+    return name + "." + ext
+}
+
+/// A filename to suggest for a DVD, from the folder it was ripped into —
+/// "MyFilm/VIDEO_TS" means the disc is called MyFilm.
+func suggestedDVDName(for videoTS: URL?, allowed: [String]) -> String {
+    guard let videoTS else { return "dvd_movie." + allowed[0] }
+    var folder = videoTS
+    if folder.lastPathComponent.uppercased() == "VIDEO_TS" {
+        folder = folder.deletingLastPathComponent()
+    }
+    let name = trimmingJunk(folder.lastPathComponent)
+    guard name.count >= 2, name != "/" else { return "dvd_movie." + allowed[0] }
+    return name + "." + allowed[0]
+}
+
+private func commonPrefix(of strings: [String]) -> String {
+    guard var prefix = strings.first else { return "" }
+    for s in strings.dropFirst() {
+        prefix = String(prefix.commonPrefix(with: s))
+        if prefix.isEmpty { break }
+    }
+    return prefix
+}
+
 // ── Formatting ───────────────────────────────────────────────────────────────
 
 func humanSize(_ bytes: Int64) -> String {

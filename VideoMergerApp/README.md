@@ -41,8 +41,18 @@ icon or sent with *Open With*. Closing the window does not quit the app.
 | **Merge a DVD folder** | finds `VIDEO_TS` (in the folder you picked, or up to three levels down), groups `VTS_<title>_<part>.VOB` into titles — skipping `_0`, the menu — and joins the chosen title's parts in order to one `.mpg`. Falls back to a byte-exact join if ffmpeg can't demux it. |
 | **Convert to MP4 (HEVC)** | re-encodes each file to `<name>_x265.mp4` beside the original, numbered if that name is taken. *Quality* is libx265 CRF 20; *Speed* is Apple's hardware HEVC encoder. |
 
-Merging and DVD joining ask where to save. Converting doesn't — each file is
-written next to its original, so a save panel per file would only be in the way.
+Merging and DVD joining ask where to save, with the name already filled in from
+the material: clips that belong together are named alike, so the prefix they
+share is the title once the `part`/`cd`/`disc` marker or counter it stops at is
+trimmed — *Le Sexe Qui Parle - Part 1.mp4* and *…Part 2.mp4* suggest *Le Sexe
+Qui Parle.mp4*. A title that genuinely ends in a number keeps it (*Rocky 2*,
+*Blade Runner 2049*). Clips with nothing in common fall back to the first one's
+name, and a DVD takes the name of the folder it was ripped into. The panel opens
+in the folder the source material is in, and the container is kept where it can
+be (merging `.mov` offers `.mov`).
+
+Converting doesn't ask — each file is written next to its original as
+`<name>_x265.mp4`, so a save panel per file would only be in the way.
 
 ### How the progress bar knows
 

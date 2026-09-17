@@ -259,13 +259,19 @@ final class MergerModel: ObservableObject {
         }
         switch mode {
         case .merge:
-            guard let output = askOutput(defaultName: "merged.mp4",
-                                         allowed: ["mp4", "mov", "m4v"]) else { return }
+            let allowed = ["mp4", "mov", "m4v"]
+            guard let output = askOutput(defaultName: suggestedMergeName(for: items,
+                                                                        allowed: allowed),
+                                         allowed: allowed,
+                                         near: items.first?.url) else { return }
             begin(.merge(items: items, output: output, allowReencode: false))
         case .dvd:
+            let allowed = ["mpg", "mpeg", "vob"]
             guard let title = chosenTitle,
-                  let output = askOutput(defaultName: "dvd_movie.mpg",
-                                         allowed: ["mpg", "mpeg", "vob"]) else { return }
+                  let output = askOutput(defaultName: suggestedDVDName(for: dvdFolder,
+                                                                      allowed: allowed),
+                                         allowed: allowed,
+                                         near: dvdFolder) else { return }
             begin(.dvd(title: title, output: output))
         case .convert:
             // Each file is written next to its original, so there is nothing to
@@ -274,17 +280,34 @@ final class MergerModel: ObservableObject {
         }
     }
 
-    private func askOutput(defaultName: String, allowed: [String]) -> URL? {
+    private func askOutput(defaultName: String, allowed: [String], near source: URL?) -> URL? {
         let panel = NSSavePanel()
         panel.nameFieldStringValue = defaultName
         panel.message = "Save the merged video as:"
         panel.canCreateDirectories = true
         panel.allowedContentTypes = allowed.compactMap { UTType(filenameExtension: $0) }
+        // Open where the source material is. The panel would otherwise land
+        // wherever it was last, which for a one-off merge is rarely right.
+        if let source, let folder = sourceFolder(source) { panel.directoryURL = folder }
         guard panel.runModal() == .OK, var url = panel.url else { return nil }
         if !allowed.contains(url.pathExtension.lowercased()) {
             url = url.appendingPathExtension(allowed[0])
         }
         return url
+    }
+
+    private func sourceFolder(_ url: URL) -> URL? {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        else { return nil }
+        // A DVD's VIDEO_TS lives inside the disc folder; offer the folder that
+        // holds the disc, not the disc's innards.
+        if isDirectory.boolValue {
+            return url.lastPathComponent.uppercased() == "VIDEO_TS"
+                ? url.deletingLastPathComponent().deletingLastPathComponent()
+                : url.deletingLastPathComponent()
+        }
+        return url.deletingLastPathComponent()
     }
 
     private func begin(_ job: Job) {
