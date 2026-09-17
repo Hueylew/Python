@@ -597,6 +597,25 @@ struct ContentView: View {
                 }
                 .font(.system(size: 11)).foregroundStyle(.secondary)
 
+                // How much has actually moved, and over what. Without this a
+                // job pushing gigabytes across AFP is indistinguishable from
+                // one working on the internal disk.
+                if let line = transferText(progress) {
+                    HStack(spacing: 6) {
+                        if !progress.transfer.isEmpty {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        Text(line)
+                            .foregroundStyle(progress.transfer.isEmpty ? .secondary
+                                                                       : .primary)
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 11))
+                    .monospacedDigit()
+                    .padding(.top, 2)
+                }
+
                 // The one phase that reports nothing. Say what it is, rather
                 // than leaving a frozen bar to be read as a crash.
                 if model.isFinalising {
@@ -617,6 +636,18 @@ struct ContentView: View {
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.10)))
         }
+    }
+
+    /// "Copying to Media over the network — 4.2 GB written · 38.2 MB/s", or
+    /// just the quiet local version. nil before anything has been written.
+    private func transferText(_ progress: JobProgress) -> String? {
+        guard progress.bytesWritten > 0 else { return nil }
+        var parts = ["\(humanSize(progress.bytesWritten)) written"]
+        let rate = humanRate(progress.rate)
+        if !rate.isEmpty { parts.append(rate) }
+        let measures = parts.joined(separator: "  ·  ")
+        return progress.transfer.isEmpty ? measures
+                                         : "\(progress.transfer) — \(measures)"
     }
 
     private func timingText(_ progress: JobProgress) -> String {

@@ -134,6 +134,13 @@ func humanSize(_ bytes: Int64) -> String {
     return String(format: index == 0 ? "%.0f %@" : "%.1f %@", value, units[index])
 }
 
+/// Throughput, e.g. "38.2 MB/s". Network shares are the reason this is worth
+/// showing: it is the difference between "slow" and "stalled".
+func humanRate(_ bytesPerSecond: Double) -> String {
+    guard bytesPerSecond > 1 else { return "" }
+    return humanSize(Int64(bytesPerSecond)) + "/s"
+}
+
 func humanDuration(_ seconds: Double) -> String {
     guard seconds > 0, seconds.isFinite else { return "—" }
     let total = Int(seconds.rounded())

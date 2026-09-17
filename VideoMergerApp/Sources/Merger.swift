@@ -10,6 +10,16 @@ struct JobProgress {
     /// ffmpeg's encoding speed, e.g. "18.4x". Empty while stream-copying fast
     /// enough that it means nothing.
     var speed: String = ""
+    /// Bytes of output written so far, across every file in the job.
+    var bytesWritten: Int64 = 0
+    /// Bytes per second, averaged over the last few seconds. 0 until there are
+    /// enough samples to mean anything.
+    var rate: Double = 0
+    /// Names the network drives this job is moving data across, e.g.
+    /// "Copying to Media over the network". Empty when it is all local, which
+    /// is what makes the line worth showing at all: a merge that is shuttling
+    /// gigabytes over AFP otherwise looks exactly like one on the internal SSD.
+    var transfer: String = ""
 }
 
 enum JobOutcome {
@@ -49,13 +59,22 @@ enum Job {
 /// files in a multi-file job.
 private final class ProgressFeed {
     private let totalSeconds: Double
+    private let transfer: String
     private let report: (JobProgress) -> Void
     private var completed: Double = 0
     private var detail: String = ""
     private var speed: String = ""
+    /// Bytes written by files already finished, so a multi-file job keeps a
+    /// running total rather than restarting at each one.
+    private var doneBytes: Int64 = 0
+    private var fileBytes: Int64 = 0
+    private var samples: [(at: Date, total: Int64)] = []
+    private var rate: Double = 0
 
-    init(totalSeconds: Double, report: @escaping (JobProgress) -> Void) {
+    init(totalSeconds: Double, transfer: String = "",
+         report: @escaping (JobProgress) -> Void) {
         self.totalSeconds = totalSeconds
+        self.transfer = transfer
         self.report = report
     }
 
@@ -66,7 +85,26 @@ private final class ProgressFeed {
 
     func finishFile(seconds: Double) {
         completed += seconds
+        doneBytes += fileBytes
+        fileBytes = 0
         emit(current: 0)
+    }
+
+    /// Bytes reported by an external copier rather than by ffmpeg.
+    func setBytes(_ written: Int64) { track(written) }
+
+    private func track(_ written: Int64) {
+        fileBytes = written
+        let now = Date()
+        let total = doneBytes + written
+        samples.append((now, total))
+        // A four-second window: long enough to ride out a stalled network
+        // write, short enough to still read as "now".
+        samples.removeAll { now.timeIntervalSince($0.at) > 4 }
+        if let first = samples.first, samples.count > 1 {
+            let seconds = now.timeIntervalSince(first.at)
+            if seconds > 0.5 { rate = Double(total - first.total) / seconds }
+        }
     }
 
     func consume(_ line: String) {
@@ -78,6 +116,10 @@ private final class ProgressFeed {
         case "out_time_us", "out_time_ms":
             // Despite the name, ffmpeg reports out_time_ms in microseconds too.
             if let micro = Double(value), micro >= 0 { emit(current: micro / 1_000_000) }
+        case "total_size":
+            // How much output exists so far. On a stream copy to a share this
+            // is literally the number of bytes that have crossed the network.
+            if let written = Int64(value), written >= 0 { track(written) }
         case "speed":
             // "N/A" until the first frames land — not worth showing.
             speed = value.hasSuffix("x") ? value : ""
@@ -91,7 +133,9 @@ private final class ProgressFeed {
         if totalSeconds > 0 {
             fraction = min(max((completed + current) / totalSeconds, 0), 1)
         }
-        report(JobProgress(fraction: fraction, detail: detail, speed: speed))
+        report(JobProgress(fraction: fraction, detail: detail, speed: speed,
+                           bytesWritten: doneBytes + fileBytes, rate: rate,
+                           transfer: transfer))
     }
 }
 
@@ -127,6 +171,44 @@ func isOnNetworkVolume(_ url: URL) -> Bool {
     guard let local = (try? probe.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal
     else { return false }       // can't tell — behave as we always did
     return !local
+}
+
+/// The network volume a path sits on, or nil when it is on a local disk.
+private func networkVolume(of url: URL) -> String? {
+    let fm = FileManager.default
+    let probe = fm.fileExists(atPath: url.path) ? url : url.deletingLastPathComponent()
+    guard let local = (try? probe.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal,
+          !local else { return nil }
+    return (try? probe.resourceValues(forKeys: [.volumeNameKey]))?.volumeName
+        ?? "a network drive"
+}
+
+/// Says which network drives a job will move data across, for the window to
+/// show while it runs. Empty when everything is on local disks — there is
+/// nothing to warn about then, and a line that always appears stops being read.
+private func transferNote(from inputs: [URL], to output: URL) -> String {
+    let sources = Set(inputs.compactMap(networkVolume(of:))).sorted()
+    let destination = networkVolume(of: output)
+
+    func list(_ names: [String]) -> String {
+        names.count <= 1 ? (names.first ?? "")
+                         : names.dropLast().joined(separator: ", ") + " and " + names.last!
+    }
+
+    switch (sources.isEmpty, destination) {
+    case (true, nil):
+        return ""
+    case (true, let to?):
+        return "Copying to \(to) over the network"
+    case (false, nil):
+        return "Copying from \(list(sources)) over the network"
+    case (false, let to?):
+        // Both ends on the same share still crosses the network twice: every
+        // byte is read down and written back up.
+        return sources == [to]
+            ? "Copying within \(to) over the network"
+            : "Copying from \(list(sources)) to \(to) over the network"
+    }
 }
 
 /// `+faststart` moves an MP4's index to the front, which ffmpeg does by reading
@@ -165,7 +247,9 @@ private func runMerge(_ ffmpeg: String, _ items: [MediaItem], _ output: URL,
     }
 
     let total = items.reduce(0) { $0 + $1.duration }
-    let feed = ProgressFeed(totalSeconds: total, report: report)
+    let feed = ProgressFeed(totalSeconds: total,
+                            transfer: transferNote(from: items.map(\.url), to: output),
+                            report: report)
     let what = allowReencode ? "Re-encoding \(items.count) clips into one"
                              : "Joining \(items.count) clips"
     feed.startFile(what)
@@ -198,7 +282,9 @@ private func runDVD(_ ffmpeg: String, _ title: DVDTitle, _ output: URL,
                     _ control: JobControl,
                     _ report: @escaping (JobProgress) -> Void) -> JobOutcome {
     let total = title.parts.reduce(0.0) { $0 + inspect($1).duration }
-    let feed = ProgressFeed(totalSeconds: total, report: report)
+    let feed = ProgressFeed(totalSeconds: total,
+                            transfer: transferNote(from: title.parts, to: output),
+                            report: report)
     feed.startFile("Joining title \(title.number) — \(title.parts.count) parts")
 
     // VOBs are MPEG program streams, which the concat *protocol* joins byte-wise
@@ -215,7 +301,9 @@ private func runDVD(_ ffmpeg: String, _ title: DVDTitle, _ output: URL,
     try? FileManager.default.removeItem(at: output)
     report(JobProgress(fraction: nil, detail: "Joining parts directly…"))
     if concatenateBytes(title.parts, to: output, control: control,
-                        totalBytes: title.bytes, report: report) {
+                        totalBytes: title.bytes,
+                        transfer: transferNote(from: title.parts, to: output),
+                        report: report) {
         return .finished(outputs: [output])
     }
     if control.isCancelled { try? FileManager.default.removeItem(at: output); return .cancelled }
@@ -226,7 +314,7 @@ private func runDVD(_ ffmpeg: String, _ title: DVDTitle, _ output: URL,
 /// Byte-for-byte append of every part into one file, in 8MB chunks so a 7GB
 /// title doesn't have to fit in memory and the bar keeps moving.
 private func concatenateBytes(_ parts: [URL], to output: URL, control: JobControl,
-                              totalBytes: Int64,
+                              totalBytes: Int64, transfer: String,
                               report: @escaping (JobProgress) -> Void) -> Bool {
     let fm = FileManager.default
     fm.createFile(atPath: output.path, contents: nil)
@@ -234,6 +322,9 @@ private func concatenateBytes(_ parts: [URL], to output: URL, control: JobContro
     defer { try? sink.close() }
 
     var written: Int64 = 0
+    var samples: [(at: Date, total: Int64)] = []
+    var rate: Double = 0
+
     for part in parts {
         guard let source = try? FileHandle(forReadingFrom: part) else { return false }
         defer { try? source.close() }
@@ -242,9 +333,19 @@ private func concatenateBytes(_ parts: [URL], to output: URL, control: JobContro
             guard let chunk = try? source.read(upToCount: 8 << 20), !chunk.isEmpty else { break }
             do { try sink.write(contentsOf: chunk) } catch { return false }
             written += Int64(chunk.count)
+
+            let now = Date()
+            samples.append((now, written))
+            samples.removeAll { now.timeIntervalSince($0.at) > 4 }
+            if let first = samples.first, samples.count > 1 {
+                let seconds = now.timeIntervalSince(first.at)
+                if seconds > 0.5 { rate = Double(written - first.total) / seconds }
+            }
+
             report(JobProgress(
                 fraction: totalBytes > 0 ? Double(written) / Double(totalBytes) : nil,
-                detail: "Joining parts directly — \(part.lastPathComponent)"))
+                detail: "Joining parts directly — \(part.lastPathComponent)",
+                bytesWritten: written, rate: rate, transfer: transfer))
         }
     }
     return true
@@ -256,7 +357,13 @@ private func runConvert(_ ffmpeg: String, _ items: [MediaItem], _ encoder: HEVCE
                         _ control: JobControl,
                         _ report: @escaping (JobProgress) -> Void) -> JobOutcome {
     let total = items.reduce(0) { $0 + $1.duration }
-    let feed = ProgressFeed(totalSeconds: total, report: report)
+    // Converting writes beside each original, so the route is the same for all
+    // of them — the first one describes the job.
+    let feed = ProgressFeed(totalSeconds: total,
+                            transfer: items.first.map {
+                                transferNote(from: [$0.url], to: uniqueOutput(for: $0.url))
+                            } ?? "",
+                            report: report)
     var outputs: [URL] = []
     var failures: [String] = []
 

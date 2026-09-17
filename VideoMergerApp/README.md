@@ -52,6 +52,13 @@ Measuring one against the other gives a true percentage rather than a bar that
 merely spins. A file whose duration can't be read contributes nothing to the
 total, and if *nothing* is known the bar falls back to indeterminate.
 
+The feed's `total_size` gives the bytes of output written so far, which on a
+stream copy is literally the amount of data that has crossed the wire. The
+window shows that with a throughput figure, and — when either end of the job is
+on a network volume — names the drive: *Copying to Media over the network — 3.9
+GB written · 13.6 MB/s*. On an all-local job the drive name is left off, so the
+line stays meaningful when it does appear.
+
 A one-second heartbeat redraws the window independently of that feed, so the
 elapsed clock keeps moving even when ffmpeg says nothing. If the feed stays
 quiet for more than five seconds the window says it is finalising — otherwise a
