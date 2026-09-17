@@ -29,9 +29,9 @@ One window:
   **Cancel**. Cancelling deletes the half-written output.
 * **Result** – every file written, with **Show in Finder** and **Open**. It
   stays on screen, and the window is ready for the next job. A successful merge
-  or conversion empties the file list, since those inputs have been dealt with;
-  a failed or cancelled one keeps its list so it can be retried. A DVD keeps its
-  titles either way — they are a menu of the disc, not a queue.
+  empties the file list, since those clips are now one file; a failed or
+  cancelled one keeps its list so it can be retried. Converting never clears —
+  it leaves every original where it was — and a DVD keeps its titles.
 
 The whole window is a drop target, and files can also be dropped on the Dock
 icon or sent with *Open With*. Closing the window does not quit the app.

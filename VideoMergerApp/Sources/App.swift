@@ -87,7 +87,7 @@ final class MergerModel: ObservableObject {
 
     var startLabel: String {
         switch mode {
-        case .merge:   return "Merge \(items.count) Clips"
+        case .merge:   return "Merge \(items.count) Clip\(items.count == 1 ? "" : "s")"
         case .convert: return items.count == 1 ? "Convert" : "Convert \(items.count) Files"
         case .dvd:     return "Merge DVD Title"
         }
@@ -363,19 +363,21 @@ final class MergerModel: ObservableObject {
                 statusText += "  (network drive — index left at the end of the file, "
                     + "which avoids rewriting it across the network)"
             }
-            // Those inputs have been dealt with. Leaving them listed invites
-            // merging them a second time, and the next job starts by clearing
-            // them by hand anyway. Only on success — a failed or cancelled run
-            // is one you want to retry, so it keeps its list.
+            // A merge consumes its clips: they are now one file, so leaving
+            // them listed only invites joining them again. Only on success — a
+            // failed or cancelled run is one you want to retry, so it keeps
+            // its list.
             //
-            // A disc's titles are a menu rather than a queue: joining one is no
-            // reason to make the folder be picked again to reach another. So
-            // they stay.
+            // Converting consumes nothing. Each original is untouched, with a
+            // new file written beside it, so the list still describes something
+            // real — worth keeping to run again at the other quality, or just
+            // to see what was done. A disc's titles stay for the same sort of
+            // reason: they are a menu of what is on the disc, not a queue.
             switch job {
-            case .merge, .convert:
+            case .merge:
                 items = []
                 selection = []
-            case .dvd:
+            case .convert, .dvd:
                 break
             }
 
