@@ -52,6 +52,24 @@ Measuring one against the other gives a true percentage rather than a bar that
 merely spins. A file whose duration can't be read contributes nothing to the
 total, and if *nothing* is known the bar falls back to indeterminate.
 
+A one-second heartbeat redraws the window independently of that feed, so the
+elapsed clock keeps moving even when ffmpeg says nothing. If the feed stays
+quiet for more than five seconds the window says it is finalising — otherwise a
+frozen bar is indistinguishable from a crash.
+
+### Saving to a NAS
+
+MP4 keeps its index (`moov`) at the end unless `+faststart` is used, and ffmpeg
+implements that by reading the finished file back and writing the whole thing
+out again. On a local disk that is quick. Over a network share it turns one
+transfer into three — a 9GB merge onto an AFP-mounted NAS spent most of half an
+hour doing it, reporting no progress throughout.
+
+The index only needs to be at the front for progressive streaming straight off a
+web server; every player that opens a file seeks to the end and finds it there.
+So when the destination is not a local volume, `+faststart` is skipped and the
+result says so. Local saves are unchanged.
+
 ## Requirements
 
 * macOS 13+ (built and tested on macOS 26, Apple Silicon)

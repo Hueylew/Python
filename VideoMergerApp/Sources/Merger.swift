@@ -119,6 +119,29 @@ private let commonArgs = [
     "-y", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
 ]
 
+/// True when the file will be written to a network volume.
+func isOnNetworkVolume(_ url: URL) -> Bool {
+    // The output doesn't exist yet, so ask the folder it will be created in.
+    let probe = FileManager.default.fileExists(atPath: url.path)
+        ? url : url.deletingLastPathComponent()
+    guard let local = (try? probe.resourceValues(forKeys: [.volumeIsLocalKey]))?.volumeIsLocal
+    else { return false }       // can't tell — behave as we always did
+    return !local
+}
+
+/// `+faststart` moves an MP4's index to the front, which ffmpeg does by reading
+/// the finished file back and writing the whole thing out again. Locally that's
+/// quick. On a share it turns one transfer into three — a 9GB merge onto a NAS
+/// spent most of half an hour here, reporting no progress the entire time.
+///
+/// The index only has to be at the front for progressive streaming straight off
+/// a web server. Every player that opens a file — and everything that reads from
+/// a NAS — simply seeks to the end and finds it there. So it isn't worth 3x the
+/// network, and we skip it when the destination isn't a local disk.
+private func faststartArgs(for output: URL) -> [String] {
+    isOnNetworkVolume(output) ? [] : ["-movflags", "+faststart"]
+}
+
 // ── Merging video files ──────────────────────────────────────────────────────
 
 private func runMerge(_ ffmpeg: String, _ items: [MediaItem], _ output: URL,
@@ -154,7 +177,8 @@ private func runMerge(_ ffmpeg: String, _ items: [MediaItem], _ output: URL,
     let args = commonArgs
         + ["-f", "concat", "-safe", "0", "-i", listFile.path]
         + encodeArgs
-        + ["-movflags", "+faststart", output.path]
+        + faststartArgs(for: output)
+        + [output.path]
 
     let result = runProcess(ffmpeg, args, control: control) { feed.consume($0) }
     if result.cancelled { try? FileManager.default.removeItem(at: output); return .cancelled }
@@ -277,8 +301,8 @@ private func convertArgs(_ input: URL, _ output: URL,
     // -map 0:a? keeps the audio when there is some and doesn't fail when there
     // isn't. hvc1 is the tag QuickTime needs to play HEVC in an MP4.
     let common = commonArgs + ["-i", input.path, "-map", "0:v:0", "-map", "0:a?"]
-    let audio = ["-tag:v", "hvc1", "-c:a", "aac", "-b:a", "192k",
-                 "-movflags", "+faststart", output.path]
+    let audio = ["-tag:v", "hvc1", "-c:a", "aac", "-b:a", "192k"]
+        + faststartArgs(for: output) + [output.path]
     switch encoder {
     case .quality:
         return common + ["-c:v", "libx265", "-crf", "20", "-preset", "medium"] + audio

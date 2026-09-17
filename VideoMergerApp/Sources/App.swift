@@ -36,12 +36,28 @@ final class MergerModel: ObservableObject {
     @Published var running = false
     @Published var progress: JobProgress?
     @Published var startedAt: Date?
+    /// Ticks once a second while a job runs, purely so the window keeps
+    /// redrawing. ffmpeg's progress feed is the only other thing that moves the
+    /// UI, and it goes completely silent for its final pass — without this the
+    /// elapsed clock stops too, and a working app is indistinguishable from a
+    /// crashed one.
+    @Published var heartbeat = Date()
     @Published var statusText = "Drag video files onto the window to get started."
     @Published var results: [URL] = []
     @Published var alert: AlertBox?
     @Published var reencodeOffer: ReencodeOffer?
 
     private var control = JobControl()
+    private var heartbeatTimer: Timer?
+    private var lastProgressAt = Date()
+
+    /// Writing an MP4 with the index at the front means rewriting the whole
+    /// file once the last frame is in, and ffmpeg reports nothing at all while
+    /// it does. On a local disk that is a blink; on a network share a big file
+    /// can sit here for many minutes. Treat a long silence as that phase.
+    var isFinalising: Bool {
+        running && heartbeat.timeIntervalSince(lastProgressAt) > 5
+    }
 
     struct AlertBox: Identifiable {
         let id = UUID()
@@ -281,9 +297,19 @@ final class MergerModel: ObservableObject {
         let control = JobControl()
         self.control = control
 
+        lastProgressAt = Date()
+        heartbeat = Date()
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.heartbeat = Date() }
+        }
+
         Task.detached(priority: .userInitiated) {
             let outcome = run(job: job, control: control) { update in
-                Task { @MainActor in self.progress = update }
+                Task { @MainActor in
+                    self.progress = update
+                    self.lastProgressAt = Date()
+                }
             }
             await MainActor.run { self.finish(job, outcome) }
         }
@@ -296,6 +322,8 @@ final class MergerModel: ObservableObject {
 
     private func finish(_ job: Job, _ outcome: JobOutcome) {
         running = false
+        heartbeatTimer?.invalidate()
+        heartbeatTimer = nil
         progress = nil
         let elapsed = startedAt.map { -$0.timeIntervalSinceNow } ?? 0
         startedAt = nil
@@ -306,6 +334,12 @@ final class MergerModel: ObservableObject {
             let what = outputs.count == 1 ? outputs[0].lastPathComponent
                                           : "\(outputs.count) files"
             statusText = String(format: "Done in %@ — %@", humanDuration(elapsed), what)
+            // Saying so once beats the file layout quietly depending on where
+            // it was saved.
+            if let first = outputs.first, isOnNetworkVolume(first) {
+                statusText += "  (network drive — index left at the end of the file, "
+                    + "which avoids rewriting it across the network)"
+            }
             // The window stays open and ready for the next job, so nudge the
             // Dock instead: a long encode is watched from another app, if at all.
             if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
@@ -562,6 +596,23 @@ struct ContentView: View {
                         .monospacedDigit()
                 }
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+
+                // The one phase that reports nothing. Say what it is, rather
+                // than leaving a frozen bar to be read as a crash.
+                if model.isFinalising {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .progressViewStyle(.circular)
+                        Text("Finalising — rewriting the file so it starts instantly. "
+                             + "ffmpeg reports no progress during this, and a large file "
+                             + "on a network drive can take several minutes.")
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
+                }
             }
             .padding(10)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.10)))
@@ -571,12 +622,17 @@ struct ContentView: View {
     private func timingText(_ progress: JobProgress) -> String {
         var parts: [String] = []
         if let started = model.startedAt {
-            let elapsed = -started.timeIntervalSinceNow
+            // Read off the heartbeat so this recomputes every second even while
+            // ffmpeg is saying nothing.
+            let elapsed = model.heartbeat.timeIntervalSince(started)
             parts.append("\(humanDuration(elapsed)) elapsed")
             // Only guess at a finish time once there is enough of a run to
             // extrapolate from — an estimate off the first second is noise.
             if let fraction = progress.fraction, fraction > 0.02, elapsed > 2 {
-                parts.append("~\(humanDuration(elapsed / fraction - elapsed)) left")
+                // At 100% the remainder is zero, and "~— left" reads as a
+                // glitch. There is nothing useful to estimate by then anyway.
+                let remaining = elapsed / fraction - elapsed
+                if remaining >= 1 { parts.append("~\(humanDuration(remaining)) left") }
             }
         }
         if !progress.speed.isEmpty { parts.append(progress.speed) }
