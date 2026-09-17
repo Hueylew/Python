@@ -363,6 +363,22 @@ final class MergerModel: ObservableObject {
                 statusText += "  (network drive — index left at the end of the file, "
                     + "which avoids rewriting it across the network)"
             }
+            // Those inputs have been dealt with. Leaving them listed invites
+            // merging them a second time, and the next job starts by clearing
+            // them by hand anyway. Only on success — a failed or cancelled run
+            // is one you want to retry, so it keeps its list.
+            //
+            // A disc's titles are a menu rather than a queue: joining one is no
+            // reason to make the folder be picked again to reach another. So
+            // they stay.
+            switch job {
+            case .merge, .convert:
+                items = []
+                selection = []
+            case .dvd:
+                break
+            }
+
             // The window stays open and ready for the next job, so nudge the
             // Dock instead: a long encode is watched from another app, if at all.
             if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }

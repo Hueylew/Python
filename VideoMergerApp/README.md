@@ -28,7 +28,10 @@ One window:
   elapsed time, an estimate of what's left, and ffmpeg's encoding speed, plus
   **Cancel**. Cancelling deletes the half-written output.
 * **Result** – every file written, with **Show in Finder** and **Open**. It
-  stays on screen, and the window is ready for the next job.
+  stays on screen, and the window is ready for the next job. A successful merge
+  or conversion empties the file list, since those inputs have been dealt with;
+  a failed or cancelled one keeps its list so it can be retried. A DVD keeps its
+  titles either way — they are a menu of the disc, not a queue.
 
 The whole window is a drop target, and files can also be dropped on the Dock
 icon or sent with *Open With*. Closing the window does not quit the app.
