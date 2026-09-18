@@ -40,6 +40,10 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
         if !d.isEmpty { ioQueue.sync { errData.append(d) } }
     }
 
+    // Set before run(), so an immediate exit can't be missed.
+    let sem = DispatchSemaphore(value: 0)
+    proc.terminationHandler = { _ in sem.signal() }
+
     do {
         try proc.run()
     } catch {
@@ -49,22 +53,27 @@ func runProcess(_ launchPath: String, _ args: [String], timeout: TimeInterval? =
 
     let started = Date()
     var timedOut = false
-    if let timeout = timeout {
-        let sem = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async { proc.waitUntilExit(); sem.signal() }
-        if sem.wait(timeout: .now() + timeout) == .timedOut {
-            timedOut = true
-            proc.terminate()
-            if sem.wait(timeout: .now() + 5) == .timedOut {
-                if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
-                // Wait for the kill to actually land. Asking a still-running
-                // task for its terminationStatus raises an ObjC exception that
-                // Swift cannot catch, which would take the whole app down.
-                _ = sem.wait(timeout: .now() + 5)
-            }
+
+    // Wait via terminationHandler rather than parking a thread in
+    // waitUntilExit().
+    //
+    // That earlier approach burned one GCD worker per subprocess, and a global
+    // queue only has about 64. Once enough piled up, nothing new could be
+    // scheduled at all: the semaphore was never signalled, so every call
+    // reported a timeout whether or not ffmpeg had actually succeeded. A real
+    // scan wedged itself this way — 579 timeouts on files that read in 119ms
+    // from a shell, with 63 threads stuck in waitUntilExit. The handler costs
+    // no thread at all.
+    if sem.wait(timeout: .now() + (timeout ?? .infinity)) == .timedOut {
+        timedOut = true
+        proc.terminate()
+        if sem.wait(timeout: .now() + 5) == .timedOut {
+            if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
+            // Wait for the kill to land. Asking a still-running task for its
+            // terminationStatus raises an ObjC exception Swift cannot catch,
+            // which would take the whole app down.
+            _ = sem.wait(timeout: .now() + 5)
         }
-    } else {
-        proc.waitUntilExit()
     }
 
     outPipe.fileHandleForReading.readabilityHandler = nil
